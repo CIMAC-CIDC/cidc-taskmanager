@@ -57,7 +57,7 @@ def run_cromwell(data):
                 "gsutil",
                 "cp",
                 "gs://lloyd-test-pipeline/cidc-pipelines-master/wdl/bwa.wdl",
-                "."
+                "cromwell_run/"
             ]
         )
         print("wdl copied")
@@ -66,7 +66,7 @@ def run_cromwell(data):
                 "gsutil",
                 "cp",
                 "gs://lloyd-test-pipeline/cidc-pipelines-master/wdl/utilities/*",
-                "."
+                "cromwell_run/"
             ]
         )
         print("utilities downloaded")
@@ -75,12 +75,12 @@ def run_cromwell(data):
                 "gsutil",
                 "cp",
                 "gs://lloyd-test-pipeline/cidc-pipelines-master/wdl/configs/google_cloud.conf",
-                "."
+                "cromwell_run/"
             ],
             stderr=subprocess.STDOUT
         )
         print("google config copied")
-        with open("inputs.json", "w") as input_file:
+        with open("cromwell_run/inputs.json", "w") as input_file:
             input_file.write(input_string)
         print("inputs created")
         cromwell_args = [
@@ -91,13 +91,21 @@ def run_cromwell(data):
             'run',
             "bwa.wdl",
             "--inputs",
-            "inputs.json"
+            "cromwell_run/inputs.json"
         ]
         subprocess.check_output(
             cromwell_args,
             stderr=subprocess.STDOUT
         )
         print("cromwell done")
+        subprocess.check_output(
+            [
+                'rm',
+                'cromwell_run/*'
+            ],
+            stderr=subprocess.STDOUT
+        )
+        print("cleanup done")
         return "Succeeded!"
     except subprocess.CalledProcessError as error:
         print("Cromwell job failed: " + str(error.output))

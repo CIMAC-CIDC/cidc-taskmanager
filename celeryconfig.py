@@ -3,7 +3,7 @@
 """
 
 
-BROKER_URL = 'amqp://localhost'
+BROKER_URL = 'amqp://rabbitmq:5672'
 RESULT_BACKEND = 'rpc://'
 
 TASK_SERIALIZER = 'json'
