@@ -83,14 +83,16 @@ def run_cromwell(data):
         with open("cromwell_run/inputs.json", "w") as input_file:
             input_file.write(input_string)
         print("inputs created")
+        subprocess.check_output("ls")
+        print("list?")
         cromwell_args = [
             'java',
-            '-Dconfig.file=google_cloud.conf',
+            '-Dconfig.file=cromwell_run/google_cloud.conf',
             '-jar',
-            '../Cromwell/cromwell-30.2.jar',
+            'cromwell-30.2.jar',
             'run',
-            "bwa.wdl",
-            "--inputs",
+            "cromwell_run/bwa.wdl",
+            "-i",
             "cromwell_run/inputs.json"
         ]
         subprocess.check_output(
@@ -98,14 +100,6 @@ def run_cromwell(data):
             stderr=subprocess.STDOUT
         )
         print("cromwell done")
-        subprocess.check_output(
-            [
-                'rm',
-                'cromwell_run/*'
-            ],
-            stderr=subprocess.STDOUT
-        )
-        print("cleanup done")
         return "Succeeded!"
     except subprocess.CalledProcessError as error:
         print("Cromwell job failed: " + str(error.output))
