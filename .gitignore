@@ -2,3 +2,4 @@ __pycache__/
 .vscode
 cromwell-workflow-logs/
 .google_auth.json
+cromwell_run/*
