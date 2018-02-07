@@ -1,18 +1,18 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "2957f0d150b882c544cc66ea352bb319c04fa2bbe6eb78f48543ef5d53bdcdd1"
+            "sha256": "9989d1705682a57a5fd772f3bf89822e3a6f0587877d38bc188de6d392fa5c3f"
         },
         "host-environment-markers": {
             "implementation_name": "cpython",
-            "implementation_version": "3.6.3",
+            "implementation_version": "3.6.4",
             "os_name": "posix",
             "platform_machine": "x86_64",
             "platform_python_implementation": "CPython",
             "platform_release": "4.14.13-300.fc27.x86_64",
             "platform_system": "Linux",
             "platform_version": "#1 SMP Thu Jan 11 04:00:01 UTC 2018",
-            "python_full_version": "3.6.3",
+            "python_full_version": "3.6.4",
             "python_version": "3.6",
             "sys_platform": "linux"
         },
@@ -127,6 +127,12 @@
             ],
             "version": "==2.2.0"
         },
+        "python-logstash": {
+            "hashes": [
+                "sha256:10943e5df83f592b4d61b63ad1afff855ccc8c9467f78718f0a59809ba1fe68c"
+            ],
+            "version": "==0.4.6"
+        },
         "pytz": {
             "hashes": [
                 "sha256:80af0f3008046b9975242012a985f04c5df1f01eed4ec1633d56cc47a75a6a48",
@@ -164,10 +170,10 @@
         },
         "sphinx": {
             "hashes": [
-                "sha256:b8baed19394af85b21755c68c7ec4eac57e8a482ed89cd01cd5d5ff72200fe0f",
-                "sha256:c39a6fa41bd3ec6fc10064329a664ed3a3ca2e27640a823dc520c682e4433cdb"
+                "sha256:d5b91b4dad56ffc9f19425ebaa7bc23290a0a2e9035781d5bc54822384663277",
+                "sha256:832bed0dc6099c2abca957d90ff55bc1a6ec4425c13fc144adbae68a970e3775"
             ],
-            "version": "==1.6.6"
+            "version": "==1.6.7"
         },
         "sphinxcontrib-websupport": {
             "hashes": [
