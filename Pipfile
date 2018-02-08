@@ -9,6 +9,9 @@ name = "pypi"
 
 celery = "*"
 sphinx = "*"
+python-logstash = "*"
+kombu = "*"
+nose = "*"
 
 
 [dev-packages]
