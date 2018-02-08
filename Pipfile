@@ -11,6 +11,7 @@ celery = "*"
 sphinx = "*"
 python-logstash = "*"
 kombu = "*"
+nose = "*"
 
 
 [dev-packages]
