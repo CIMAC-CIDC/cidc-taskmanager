@@ -8,8 +8,8 @@ import json
 import re
 import os
 import logging
-from rabbit_handler import RabbitMQHandler
-from .celery_app import APP
+from framework.utilities.rabbit_handler import RabbitMQHandler
+from framework.celery.celery import APP
 
 LOGGER = logging.getLogger('taskmanager')
 LOGGER.setLevel(logging.DEBUG)
@@ -32,7 +32,8 @@ def inject_google_zones(valid_zones, wdl_directory):
             file_contents = open_wdl.read()
             # check if they are missing zone string
             if re.search(r'runtime', file_contents) and not re.search(r'zones:', file_contents):
-                LOGGER.info('File: ' + wdl + 'does not have a zones argument, inserting...')
+                log_string = 'File: ' + wdl + 'does not have a zones argument, inserting...'
+                LOGGER.info(log_string)
                 with open(wdl_directory + "/" + wdl, 'r') as bad_wdl:
                     # if so, read them line by line into a temporary file
                     tmp_file = open(wdl_directory + "/" + 'tmp_' + wdl, 'a')
@@ -47,7 +48,8 @@ def inject_google_zones(valid_zones, wdl_directory):
                             tmp_file.write(line)
                     # replace the old file with the new one.
                     os.replace(wdl_directory + "/" + 'tmp_' + wdl, wdl_directory + "/" + wdl)
-                    LOGGER.info('File: ' + wdl + 'replaced with new file')
+                    info_string = 'File: ' + wdl + 'replaced with new file'
+                    LOGGER.info(info_string)
 
 
 def run_subprocess_with_logs(cl_args, message, encoding='utf-8'):

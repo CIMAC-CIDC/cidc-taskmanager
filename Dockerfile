@@ -18,4 +18,4 @@ RUN pip3 install pipenv
 RUN pipenv install --system
 
 
-CMD ["celery", "-A", "taskmanager", "worker", "--loglevel=info", "-E"]
+CMD ["celery", "-A", "framework.celery.celery", "worker", "--loglevel=info", "-E"]
