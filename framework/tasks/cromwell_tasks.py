@@ -63,12 +63,34 @@ def run_subprocess_with_logs(cl_args, message, encoding='utf-8'):
         encoding {string} -- indicates the encoding of the shell command output.
     """
     try:
-        results = subprocess.run(cl_args, stdout=subprocess.PIPE)
+        results = subprocess.run(cl_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         formatted_results = message + results.stdout.decode(encoding)
         LOGGER.debug(formatted_results)
     except subprocess.CalledProcessError as error:
         error_string = 'Shell command generated error' + str(error.output)
         LOGGER.error(error_string)
+
+
+def fetch_dependencies(deps):
+    """
+    Fetch the dependencies specified by the WDL files.
+
+    Arguments:
+        deps {[string]} -- List of Google Storage URLS.
+    """
+    # Input should be a list
+    for uri in deps:
+        # validate that url is sensible
+        comp_pattern = re.compile(r'^gs://\w+/[/A-z0-9]+')
+        if not re.match(comp_pattern, uri):
+            raise RuntimeError('Invalid GS URI Detected: ' + uri)
+        req_sp_args = [
+            "gsutil",
+            "cp",
+            uri,
+            "cromwell_run/"
+        ]
+        run_subprocess_with_logs(req_sp_args, "Fetched Dependencies for Job: ")
 
 
 @APP.task
