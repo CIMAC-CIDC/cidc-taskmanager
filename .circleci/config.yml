@@ -22,9 +22,28 @@ jobs:
           command: |
             . venv/bin/activate
             pipenv install --system
+  
+  deploy:
+    docker:
+      - image: docker:17.12.0-ce
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: "Build docker file"
+          command: |
+            docker build -t cidc/celery-taskmanager:latest .
+      - deploy:
+          name: "Deploy to docker hub"
+          command: |
+            docker login --username $DOCKERHUB_USERNAME --password $DOCKERHUB_PASSWORD
+            docker push cidc/celery-taskmanager
 
 workflows:
   version: 2
-  build-test:
+  build-deploy:
     jobs:
       - build
+      - deploy:
+          requires:
+            - build
