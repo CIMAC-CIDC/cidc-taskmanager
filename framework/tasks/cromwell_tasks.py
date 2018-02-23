@@ -8,7 +8,11 @@ import json
 import re
 import os
 import logging
+import requests
+import datetime
+from uuid import uuid4
 from framework.utilities.rabbit_handler import RabbitMQHandler
+from framework.utilities.eve_methods import request_eve_endpoint
 from framework.celery.celery import APP
 
 
@@ -91,6 +95,42 @@ def fetch_dependencies(deps):
             "cromwell_run/"
         ]
         run_subprocess_with_logs(req_sp_args, "Fetched Dependencies for Job: ")
+
+
+@APP.task
+def move_files_from_staging(upload_record, google_path):
+    """Function that moves a file from staging to permanent storage
+
+    Decorators:
+        APP
+
+    Arguments:
+        upload_record {[type]} -- [description]
+    """
+    staging_id = upload_record['_id']
+    files = upload_record['files']
+
+    for record in files:
+        # Construct final data URI
+        record['gs_uri'] = google_path + record['trial'] + '/'\
+         + record['assay'] + '/' + str(uuid4()) + '/' + record['file_name']
+        record['date_created'] = str(datetime.datetime.now().isoformat())
+        old_uri = google_path + "staging/" + staging_id['$oid'] + '/' + record['file_name']
+        # Move file to destination.
+        gs_args = [
+            'gsutil',
+            'mv',
+            old_uri,
+            record['gs_uri']
+        ]
+        run_subprocess_with_logs(gs_args, "Moving Files: ")
+    # when move is completed, insert data objects
+    for item in files:
+        print(item)
+
+    response = request_eve_endpoint('testing_token', files, 'data')
+    print(response.reason)
+    print(response.json())
 
 
 @APP.task
