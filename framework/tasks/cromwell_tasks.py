@@ -129,8 +129,14 @@ def move_files_from_staging(upload_record, google_path):
         print(item)
 
     response = request_eve_endpoint('testing_token', files, 'data')
-    print(response.reason)
-    print(response.json())
+
+    if not response.status_code == 201:
+        print("Error creating data entries, exiting")
+        print(response.reason)
+        return 
+
+    # Next step, run assay on trials.
+    
 
 
 @APP.task
