@@ -17,5 +17,4 @@ RUN gcloud auth activate-service-account --key-file=./.google_auth.json
 RUN pip3 install pipenv
 RUN pipenv install --system
 
-
 CMD ["celery", "-A", "framework.celery.celery", "worker", "--loglevel=info", "-E"]

@@ -75,26 +75,37 @@ def run_subprocess_with_logs(cl_args, message, encoding='utf-8'):
         LOGGER.error(error_string)
 
 
-def fetch_dependencies(deps):
+def fetch_pipelines_bucket():
     """
-    Fetch the dependencies specified by the WDL files.
+    Copies the cidc-pipelines bucket to local.
+    """
+    # gs://lloyd-test-pipeline/cidc-pipelines/wdl
+    copy_wdl_args = [
+        "gsutil",
+        "cp",
+        "-r",
+        "gs://lloyd-test-pipeline/cidc-pipelines/",
+        "."
+    ]
+    run_subprocess_with_logs(copy_wdl_args, "Copied pipelines folder")
 
-    Arguments:
-        deps {[string]} -- List of Google Storage URLS.
+
+@APP.task
+def run_pipeline(trial, assay, samples, options):
     """
-    # Input should be a list
-    for uri in deps:
-        # validate that url is sensible
-        comp_pattern = re.compile(r'^gs://\w+/[/A-z0-9]+')
-        if not re.match(comp_pattern, uri):
-            raise RuntimeError('Invalid GS URI Detected: ' + uri)
-        req_sp_args = [
-            "gsutil",
-            "cp",
-            uri,
-            "cromwell_run/"
-        ]
-        run_subprocess_with_logs(req_sp_args, "Fetched Dependencies for Job: ")
+    Runs the given pipeline
+    
+    Decorators:
+        APP
+    
+    Arguments:
+        trial {str} -- Trial ID
+        assay {[type]} -- [description]
+        samples {[type]} -- [description]
+        options {[type]} -- [description]
+    """
+    # placeholder
+    print('hi')
 
 
 @APP.task
@@ -133,10 +144,9 @@ def move_files_from_staging(upload_record, google_path):
     if not response.status_code == 201:
         print("Error creating data entries, exiting")
         print(response.reason)
-        return 
+        return
 
     # Next step, run assay on trials.
-    
 
 
 @APP.task
