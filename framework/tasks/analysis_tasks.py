@@ -103,8 +103,6 @@ def run_bwa_pipeline(trial, assay, samples=None):
         else:
             # Add input variables
             new_dictionary = {}
-            static_inputs.append({"run_bwamem.fastq1": sample_id['records'][0]})
-            static_inputs.append({"run_bwamem.fastq2": sample_id['records'][1]})
 
             # Merges the list of dictionaries into one dictionary.
             for entry in static_inputs:
