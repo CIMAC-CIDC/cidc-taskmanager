@@ -4,7 +4,12 @@
 
 from celery import Celery
 
-APP = Celery('taskmanager', include=['framework.tasks.cromwell_tasks'])
+APP = Celery(
+    'taskmanager',
+    include=[
+        'framework.tasks.cromwell_tasks', 'framework.tasks.analysis_tasks'
+        ]
+    )
 
 APP.config_from_object("celeryconfig")
 
