@@ -18,8 +18,8 @@ from framework.celery.celery import APP
 
 LOGGER = logging.getLogger('taskmanager')
 LOGGER.setLevel(logging.DEBUG)
-RABBIT = RabbitMQHandler('amqp://rabbitmq')
-LOGGER.addHandler(RABBIT)
+# RABBIT = RabbitMQHandler('amqp://rabbitmq')
+# LOGGER.addHandler(RABBIT)
 
 
 def inject_google_zones(valid_zones, wdl_directory):
@@ -57,7 +57,7 @@ def inject_google_zones(valid_zones, wdl_directory):
                     LOGGER.info(info_string)
 
 
-def run_subprocess_with_logs(cl_args, message, encoding='utf-8'):
+def run_subprocess_with_logs(cl_args, message, encoding='utf-8', cwd="."):
     """
     Runs a subprocess command and logs the output.
 
@@ -67,7 +67,7 @@ def run_subprocess_with_logs(cl_args, message, encoding='utf-8'):
         encoding {string} -- indicates the encoding of the shell command output.
     """
     try:
-        results = subprocess.run(cl_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        results = subprocess.run(cl_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
         formatted_results = message + results.stdout.decode(encoding)
         LOGGER.debug(formatted_results)
     except subprocess.CalledProcessError as error:

@@ -6,6 +6,8 @@ Simple celery example
 import json
 import logging
 import re
+import datetime
+from pathlib import Path
 from framework.utilities.rabbit_handler import RabbitMQHandler
 from framework.utilities.eve_methods import request_eve_endpoint
 from framework.celery.celery import APP
@@ -14,8 +16,32 @@ from framework.tasks.cromwell_tasks import run_subprocess_with_logs
 
 LOGGER = logging.getLogger('taskmanager')
 LOGGER.setLevel(logging.DEBUG)
-RABBIT = RabbitMQHandler('amqp://rabbitmq')
-LOGGER.addHandler(RABBIT)
+# RABBIT = RabbitMQHandler('amqp://rabbitmq')
+# LOGGER.addHandler(RABBIT)
+
+
+def fetch_eve_or_fail(token, endpoint, data, code, method='POST'):
+    """
+    Method for fetching results from eve with a fail safe
+
+    Arguments:
+        token {string} -- access token
+        endpoint {string} -- endpoint data is being inserted into
+        data {dict} -- payload data to be uploaded
+        code {int} -- expected status code of the response
+
+    Keyword Arguments:
+        method {str} -- HTTP method (default: {'POST'})
+
+    Returns:
+        dict -- json formatted response from eve
+    """
+    response = request_eve_endpoint(token, data, endpoint, method)
+    if not response.status_code == code:
+        error_string = "Error performing request: " + response.reason()
+        LOGGER.error(error_string)
+        raise RuntimeError(error_string)
+    return response.json()
 
 
 def fetch_pipelines_bucket():
@@ -50,8 +76,92 @@ def dict_list_to_dict(list_of_dicts):
     return new_dictionary
 
 
+def create_analysis_entry(assay, trial, username, metadata_path, status, sample_id):
+
+    stat = "Completed" if status else "Aborted"
+
+    payload_object = {
+        'started_by': username,
+        'trial': trial,
+        'assay': assay,
+        'files_generated': [],
+        'status': {
+            'progress': stat,
+            'message': ''
+        }
+    }
+
+    filegen = payload_object['files_generated']
+    data_to_upload = []
+
+    with open(metadata_path, "w") as metadata:
+        # Parse file string to JSON
+        payload_object['metadata_blob'] = metadata
+        json_meta = json.dumps(metadata)
+        outputs = json_meta['outputs']
+
+        file_regex = r'gs://'
+        pattern = re.compile(file_regex)
+
+        for output in outputs:
+            for key, value in output.items():
+                if re.search(pattern, value):
+                    filegen.append({
+                        'file_name': key,
+                        'gs_uri': value
+                    })
+                    data_to_upload.append({
+                        'file_name': key,
+                        'gs_uri': value,
+                        'sample_id': sample_id,
+                        'trial': trial,
+                        'assay': assay,
+                        'date_created': str(datetime.datetime.now().isoformat())
+                    })
+    # Insert the analysis object
+    analysis_data = fetch_eve_or_fail('testing_token', 'analysis', payload_object, 201)
+
+    # Get the ID of the run
+    inserted_id = analysis_data['_id']
+
+    # Update data to have the run ID
+    {item.update({'analysis_id': inserted_id}) for item in data_to_upload}
+
+    # Insert data
+    data_response = fetch_eve_or_fail('testing_token', 'data', data_to_upload, 201)
+
+    return data_response
+
+
 @APP.task
-def run_bwa_pipeline(trial, assay, samples=None):
+def run_pipeline(trial, assay, samples=None):
+    """[summary]
+
+    Arguments:
+        trial {[type]} -- [description]
+        assay {[type]} -- [description]
+
+    Keyword Arguments:
+        samples {[type]} -- [description] (default: {None})
+    """
+    # Hard coded way of doing 
+    method_dictionary = {
+        'PUT BWA ID HERE': run_bwa_pipeline
+    }
+
+    if trial not in method_dictionary:
+        print("Pipeline not found!")
+        return
+
+    trial_to_run = method_dictionary[trial]
+
+
+def run_alignment():
+    print('hi')
+
+
+@APP.task
+def run_bwa_pipeline(trial, assay, username, samples=None):
     query_string = "assays/%s" % (assay)
     data_response = request_eve_endpoint('testing_token', None, query_string, 'GET')
 
@@ -76,8 +186,6 @@ def run_bwa_pipeline(trial, assay, samples=None):
     record_json = record_response.json()
     groups = record_json['_items']
 
-    print(record_json)
-
     # Make run directory
     mkdir_args = [
         "mkdir",
@@ -97,6 +205,8 @@ def run_bwa_pipeline(trial, assay, samples=None):
 
     LOGGER.debug('About to fetch pipelines bucket')
     fetch_pipelines_bucket()
+    LOGGER.debug('Pipeline bucket fetched')
+
     for sample_id in groups:
         if not len(sample_id['records']) == 2:
             print('Error for sample: ' + sample_id['_id'] + ' not a valid pair of files')
@@ -108,34 +218,46 @@ def run_bwa_pipeline(trial, assay, samples=None):
             for entry in static_inputs:
                 new_dictionary[entry['key_name']] = entry['key_value']
 
-            # Parse the pair
+            # Determine Which File is which based on ending
             pattern1 = re.compile(r'_1.')
             pattern2 = re.compile(r'_2.')
 
             for record in sample_id['records']:
                 if pattern1.search(record['file_name']):
-                    new_dictionary['run_bwamem.fastq1'] = record['gs_uri']
+                    new_dictionary['run_bwamem.bwamem.fastq1'] = record['gs_uri']
                 elif pattern2.search(record['file_name']):
-                    new_dictionary['run_bwamem.fastq2'] = record['gs_uri']
+                    new_dictionary['run_bwamem.bwamem.fastq2'] = record['gs_uri']
                 else:
                     print("ERROR NAMING CONVENTIONS NOT FOLLOWED")
-    
+
             # Create input.json file
             input_string = json.dumps(new_dictionary)
+            print(input_string)
             with open("cromwell_run/inputs.json", "w") as input_file:
                 input_file.write(input_string)
 
+            # Construct cromwell arguments
             cromwell_args = [
                 'java',
-                '-Dconfig.file=google_cloud.conf',
+                '-Dconfig.file=../google_cloud.conf',
                 '-jar',
-                'cromwell-30.2.jar',
+                '../cromwell-30.2.jar',
                 'run',
-                'cidc-pipelines/' + wdl_path,
+                wdl_path,
                 '-i',
-                'cromwell_run/inputs.json"',
+                '../cromwell_run/inputs.json',
                 "-m",
-                "cromwell_run/metadata"
+                "../cromwell_run/metadata"
             ]
             LOGGER.debug('Starting cromwell run')
-            run_subprocess_with_logs(cromwell_args, 'Cromwell run succeeded')
+
+            # Launch run
+            run_subprocess_with_logs(
+                cromwell_args, 'Cromwell run succeeded', None, "cidc-pipelines"
+            )
+
+            # Gather metadata
+            run_status = True if Path('./cromwell_run/metadata').is_file else False
+            create_analysis_entry(
+                assay, trial, username, "./cromwell_run/metadata", run_status, sample_id
+            )
