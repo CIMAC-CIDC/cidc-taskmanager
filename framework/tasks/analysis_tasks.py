@@ -258,6 +258,7 @@ def run_bwa_pipeline(trial, assay, username, samples=None):
 
             # Gather metadata
             run_status = True if Path('./cromwell_run/metadata').is_file else False
+            
             create_analysis_entry(
                 assay, trial, username, "./cromwell_run/metadata", run_status, sample_id
             )
