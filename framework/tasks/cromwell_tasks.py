@@ -67,9 +67,7 @@ def run_subprocess_with_logs(cl_args, message, encoding='utf-8', cwd="."):
         encoding {string} -- indicates the encoding of the shell command output.
     """
     try:
-        results = subprocess.run(cl_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
-        formatted_results = message + results.stdout.decode(encoding)
-        LOGGER.debug(formatted_results)
+        subprocess.run(cl_args, cwd=cwd)
     except subprocess.CalledProcessError as error:
         error_string = 'Shell command generated error' + str(error.output)
         LOGGER.error(error_string)
