@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import datetime
+import requests
 from pathlib import Path
 from framework.utilities.rabbit_handler import RabbitMQHandler
 from framework.utilities.eve_methods import request_eve_endpoint
@@ -38,7 +39,8 @@ def fetch_eve_or_fail(token, endpoint, data, code, method='POST'):
     """
     response = request_eve_endpoint(token, data, endpoint, method)
     if not response.status_code == code:
-        error_string = "Error performing request: " + response.reason()
+        error_string = "Error performing request: " + response.reason
+        LOGGER.error(response.json())
         LOGGER.error(error_string)
         raise RuntimeError(error_string)
     return response.json()
@@ -76,14 +78,19 @@ def dict_list_to_dict(list_of_dicts):
     return new_dictionary
 
 
-def create_analysis_entry(assay, trial, username, metadata_path, status, sample_id):
+def create_analysis_entry(
+        assay,
+        trial,
+        username,
+        metadata_path,
+        status,
+        sample_id,
+        analysis_id,
+        _etag):
 
     stat = "Completed" if status else "Aborted"
 
     payload_object = {
-        'started_by': username,
-        'trial': trial,
-        'assay': assay,
         'files_generated': [],
         'status': {
             'progress': stat,
@@ -94,38 +101,46 @@ def create_analysis_entry(assay, trial, username, metadata_path, status, sample_
     filegen = payload_object['files_generated']
     data_to_upload = []
 
-    with open(metadata_path, "w") as metadata:
+    with open(metadata_path, "r") as metadata:
         # Parse file string to JSON
-        payload_object['metadata_blob'] = metadata
-        json_meta = json.dumps(metadata)
+        string_meta = metadata.read()
+        payload_object['metadata_blob'] = string_meta
+        json_meta = json.loads(string_meta)
         outputs = json_meta['outputs']
 
         file_regex = r'gs://'
         pattern = re.compile(file_regex)
 
-        for output in outputs:
-            for key, value in output.items():
-                if re.search(pattern, value):
-                    filegen.append({
-                        'file_name': key,
-                        'gs_uri': value
-                    })
-                    data_to_upload.append({
-                        'file_name': key,
-                        'gs_uri': value,
-                        'sample_id': sample_id,
-                        'trial': trial,
-                        'assay': assay,
-                        'date_created': str(datetime.datetime.now().isoformat())
-                    })
+        for key, value in outputs.items():
+            if re.search(pattern, str(value)):
+                filegen.append({
+                    'file_name': key,
+                    'gs_uri': value
+                })
+                data_to_upload.append({
+                    'file_name': key,
+                    'gs_uri': value,
+                    'sample_id': sample_id,
+                    'trial': trial,
+                    'assay': assay,
+                    'analysis_id': analysis_id,
+                    'date_created': str(datetime.datetime.now().isoformat())
+                })
     # Insert the analysis object
-    analysis_data = fetch_eve_or_fail('testing_token', 'analysis', payload_object, 201)
+    
+    patch_res = requests.patch(
+        "http://ingestion-api:5000/analysis/" + analysis_id,
+        json=payload_object,
+        headers={
+            "If-Match": _etag,
+            "Authorization": 'testing_token'
+        }
+    )
 
-    # Get the ID of the run
-    inserted_id = analysis_data['_id']
-
-    # Update data to have the run ID
-    {item.update({'analysis_id': inserted_id}) for item in data_to_upload}
+    if not patch_res.status_code == 200 and not patch_res.status_code == 201:
+        print("Error communicating with eve: " + patch_res.reason)
+        if (patch_res.json()):
+            print(patch_res.json())
 
     # Insert data
     data_response = fetch_eve_or_fail('testing_token', 'data', data_to_upload, 201)
@@ -161,7 +176,7 @@ def run_alignment():
 
 
 @APP.task
-def run_bwa_pipeline(trial, assay, username, samples=None):
+def run_bwa_pipeline(trial, assay, username, analysis_id, _etag, samples=None):
     query_string = "assays/%s" % (assay)
     data_response = request_eve_endpoint('testing_token', None, query_string, 'GET')
 
@@ -253,12 +268,21 @@ def run_bwa_pipeline(trial, assay, username, samples=None):
 
             # Launch run
             run_subprocess_with_logs(
-                cromwell_args, 'Cromwell run succeeded', None, "cidc-pipelines"
+                cromwell_args, 'Cromwell run succeeded', 'utf-8', "cidc-pipelines"
             )
+
+            LOGGER.debug("Cromwell run finished")
 
             # Gather metadata
             run_status = True if Path('./cromwell_run/metadata').is_file else False
-            
+
             create_analysis_entry(
-                assay, trial, username, "./cromwell_run/metadata", run_status, sample_id
+                assay,
+                trial,
+                str(username),
+                "./cromwell_run/metadata",
+                run_status,
+                sample_id['_id'],
+                analysis_id,
+                _etag
             )
