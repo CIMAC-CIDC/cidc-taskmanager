@@ -39,8 +39,11 @@ def fetch_eve_or_fail(token, endpoint, data, code, method='POST'):
     """
     response = request_eve_endpoint(token, data, endpoint, method)
     if not response.status_code == code:
-        error_string = "Error performing request: " + response.reason
-        LOGGER.error(response.json())
+        error_string = "There was a problem with your request: "
+        if (response.json):
+            error_string += json.dumps(response.json())
+        else:
+            error_string += response.reason
         LOGGER.error(error_string)
         raise RuntimeError(error_string)
     return response.json()
