@@ -12,6 +12,7 @@ sphinx = "*"
 python-logstash = "*"
 kombu = "*"
 nose = "*"
+requests = "*"
 
 
 [dev-packages]

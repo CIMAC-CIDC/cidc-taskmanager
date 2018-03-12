@@ -39,8 +39,11 @@ def fetch_eve_or_fail(token, endpoint, data, code, method='POST'):
     """
     response = request_eve_endpoint(token, data, endpoint, method)
     if not response.status_code == code:
-        error_string = "Error performing request: " + response.reason
-        LOGGER.error(response.json())
+        error_string = "There was a problem with your request: "
+        if (response.json):
+            error_string += json.dumps(response.json())
+        else:
+            error_string += response.reason
         LOGGER.error(error_string)
         raise RuntimeError(error_string)
     return response.json()
@@ -127,7 +130,7 @@ def create_analysis_entry(
                     'date_created': str(datetime.datetime.now().isoformat())
                 })
     # Insert the analysis object
-    
+
     patch_res = requests.patch(
         "http://ingestion-api:5000/analysis/" + analysis_id,
         json=payload_object,
@@ -234,8 +237,8 @@ def run_bwa_pipeline(trial, assay, username, analysis_id, _etag, samples=None):
                 new_dictionary[entry['key_name']] = entry['key_value']
 
             # Determine Which File is which based on ending
-            pattern1 = re.compile(r'_1.')
-            pattern2 = re.compile(r'_2.')
+            pattern1 = re.compile('_1\\.')
+            pattern2 = re.compile('_2\\.')
 
             for record in sample_id['records']:
                 if pattern1.search(record['file_name']):
@@ -244,6 +247,7 @@ def run_bwa_pipeline(trial, assay, username, analysis_id, _etag, samples=None):
                     new_dictionary['run_bwamem.bwamem.fastq2'] = record['gs_uri']
                 else:
                     print("ERROR NAMING CONVENTIONS NOT FOLLOWED")
+                    raise RuntimeError("Pair naming error" + record['file_name'])
 
             # Create input.json file
             input_string = json.dumps(new_dictionary)
