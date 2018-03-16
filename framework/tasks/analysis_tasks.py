@@ -8,6 +8,7 @@ import logging
 import re
 import datetime
 import requests
+import os
 from pathlib import Path
 from framework.utilities.rabbit_handler import RabbitMQHandler
 from framework.utilities.eve_methods import request_eve_endpoint
@@ -152,33 +153,6 @@ def create_analysis_entry(
 
 
 @APP.task
-def run_pipeline(trial, assay, samples=None):
-    """[summary]
-
-    Arguments:
-        trial {[type]} -- [description]
-        assay {[type]} -- [description]
-
-    Keyword Arguments:
-        samples {[type]} -- [description] (default: {None})
-    """
-    # Hard coded way of doing 
-    method_dictionary = {
-        'PUT BWA ID HERE': run_bwa_pipeline
-    }
-
-    if trial not in method_dictionary:
-        print("Pipeline not found!")
-        return
-
-    trial_to_run = method_dictionary[trial]
-
-
-def run_alignment():
-    print('hi')
-
-
-@APP.task
 def run_bwa_pipeline(trial, assay, username, analysis_id, _etag, samples=None):
     query_string = "assays/%s" % (assay)
     data_response = request_eve_endpoint('testing_token', None, query_string, 'GET')
@@ -242,9 +216,9 @@ def run_bwa_pipeline(trial, assay, username, analysis_id, _etag, samples=None):
 
             for record in sample_id['records']:
                 if pattern1.search(record['file_name']):
-                    new_dictionary['run_bwamem.bwamem.fastq1'] = record['gs_uri']
+                    new_dictionary['run_alignment.fastq1'] = record['gs_uri']
                 elif pattern2.search(record['file_name']):
-                    new_dictionary['run_bwamem.bwamem.fastq2'] = record['gs_uri']
+                    new_dictionary['run_alignment.fastq2'] = record['gs_uri']
                 else:
                     print("ERROR NAMING CONVENTIONS NOT FOLLOWED")
                     raise RuntimeError("Pair naming error" + record['file_name'])
@@ -290,3 +264,113 @@ def run_bwa_pipeline(trial, assay, username, analysis_id, _etag, samples=None):
                 analysis_id,
                 _etag
             )
+
+
+@APP.task
+def analysis_pipeline():
+    """
+    Start of a universal "check ready" scraper.
+    """
+
+    assay_projection = {
+        'non_static_inputs': 1,
+        'static_inputs': 1,
+        'wdl_location': 1
+    }
+
+    assay_query_string = "assays?projection=%s" % (json.dumps(assay_projection))
+
+    # Contains a list of all the running assays and their inputs
+    assay_response = fetch_eve_or_fail(
+        'testing_token', assay_query_string, None, 200, 'GET'
+        )['_items']
+
+    # Creates a list of all sought mappings.
+    sought_mappings = [
+        item for sublist in [x['non_static_inputs'] for x in assay_response] for item in sublist
+    ]
+
+    # Query the data and organize it into groupings
+    # The data are grouped into unique groups via trial/assay/sample_id
+    aggregate_query = {'$inputs': sought_mappings}
+    query_string = "data/query?aggregate=%s" % (json.dumps(aggregate_query))
+    record_response = request_eve_endpoint('testing_token', None, query_string, 'GET')
+
+    if not record_response.status_code == 200:
+        print(record_response.reason)
+        return
+
+    record_json = record_response.json()
+    print(record_json)
+    groups = record_json['_items']
+
+    # Make run directory
+    if not os.path.exists("/cromwell_run"):
+        mkdir_args = [
+            "mkdir",
+            "cromwell_run"
+        ]
+        run_subprocess_with_logs(mkdir_args, "Making run directory: ")
+
+    # Copy google cloud config
+    if not os.path.exists("google_cloud.conf"):
+        LOGGER.debug('Beginning copy of cloud config file')
+        fetch_cloud_config_args = [
+            "gsutil",
+            "cp",
+            "gs://lloyd-test-pipeline/config/google_cloud.conf",
+            "."
+        ]
+        run_subprocess_with_logs(fetch_cloud_config_args, 'Google config copied: ')
+
+    if not os.path.exists("cidc-pipelines"):
+        LOGGER.debug('About to fetch pipelines bucket')
+        fetch_pipelines_bucket()
+        LOGGER.debug('Pipeline bucket fetched')
+
+    # Loop over each assay, and check for sample_id groups that
+    # fulfill the input conditions.
+    for assay in assay_response:
+        non_static_inputs = assay['non_static_inputs']
+        wdl_path = assay['wdl_location']
+        for sample_assay in groups:
+            if sample_assay['_id']['assay'] == assay['_id'] \
+                    and len(sample_assay['records']) == len(non_static_inputs):
+
+                input_dictionary = {}
+                # Map inputs to make inputs.json file
+                for entry in assay['static_inputs']:
+                    input_dictionary[entry['key_name']] = entry['key_value']
+
+                for record in sample_assay['records']:
+                    input_dictionary[record['mapping']] = record['gs_uri']
+
+                input_as_string = json.dumps(input_dictionary)
+
+                with open("cromwell_run/" + assay["_id"] + "_inputs.json", "w") as input_file:
+                    input_file.write(input_as_string)
+
+                # Construct cromwell arguments
+                cromwell_args = [
+                    'java',
+                    '-Dconfig.file=../google_cloud.conf',
+                    '-jar',
+                    '../cromwell-30.2.jar',
+                    'run',
+                    wdl_path,
+                    '-i',
+                    '../cromwell_run/' + assay['_id'] + '_inputs.json',
+                    "-m",
+                    "../cromwell_run/" + assay["_id"] + "_metadata"
+                ]
+                LOGGER.debug('Starting cromwell run')
+
+                # Launch run
+                run_subprocess_with_logs(
+                    cromwell_args, 'Cromwell run succeeded', 'utf-8', "cidc-pipelines"
+                )
+
+                LOGGER.debug("Cromwell run finished")
+
+                # Gather metadata
+                run_status = True if Path('./cromwell_run/metadata').is_file else False

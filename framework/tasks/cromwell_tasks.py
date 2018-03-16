@@ -112,6 +112,8 @@ def move_files_from_staging(upload_record, google_path):
     if not response.status_code == 201:
         print("Error creating data entries, exiting")
         print(response.reason)
+        if response.json:
+            print(response.json())
         return
 
 
