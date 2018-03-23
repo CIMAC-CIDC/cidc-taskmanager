@@ -94,6 +94,8 @@ def create_analysis_entry(
 
     stat = "Completed" if status else "Aborted"
 
+    print("Create analysis entry called")
+
     payload_object = {
         'files_generated': [],
         'status': {
@@ -149,6 +151,7 @@ def create_analysis_entry(
     # Insert data
     data_response = fetch_eve_or_fail('testing_token', 'data', data_to_upload, 201)
 
+    print('Got down here')
     return data_response
 
 
@@ -337,6 +340,26 @@ def analysis_pipeline():
             if sample_assay['_id']['assay'] == assay['_id'] \
                     and len(sample_assay['records']) == len(non_static_inputs):
 
+                assay_id = assay['_id']
+                trial_id = sample_assay['_id']['trial']
+                sample_id = sample_assay['_id']['sample_id']
+
+                print(trial_id)
+                print(sample_id)
+                print("^ ids")
+
+                # Figure out why trial id is an array
+                payload1 = {
+                    'started_by': 'lloyd',
+                    'trial': str(trial_id[0]),
+                    'assay': str(assay_id),
+                    'samples': [str(sample_id)]
+                }
+
+                res_json = fetch_eve_or_fail('testing_token', 'analysis', payload1, 201)
+                print("Caching ID" + res_json['_id'])
+                analysis_id = res_json['_id']
+
                 input_dictionary = {}
                 # Map inputs to make inputs.json file
                 for entry in assay['static_inputs']:
@@ -350,6 +373,8 @@ def analysis_pipeline():
                 with open("cromwell_run/" + assay["_id"] + "_inputs.json", "w") as input_file:
                     input_file.write(input_as_string)
 
+                metadata_path = '../cromwell_run/' + assay['_id'] + '_metadata'
+                
                 # Construct cromwell arguments
                 cromwell_args = [
                     'java',
@@ -361,7 +386,7 @@ def analysis_pipeline():
                     '-i',
                     '../cromwell_run/' + assay['_id'] + '_inputs.json',
                     "-m",
-                    "../cromwell_run/" + assay["_id"] + "_metadata"
+                    metadata_path
                 ]
                 LOGGER.debug('Starting cromwell run')
 
@@ -373,4 +398,28 @@ def analysis_pipeline():
                 LOGGER.debug("Cromwell run finished")
 
                 # Gather metadata
-                run_status = True if Path('./cromwell_run/metadata').is_file else False
+                run_status = True if Path(
+                    metadata_path
+                    ).is_file else False
+
+                payload = {
+                    '_id': analysis_id
+                }
+
+                an_res = fetch_eve_or_fail('testing_token', 'analysis', payload, 200, 'GET')
+
+                print('fetching analysis etag')
+                print(an_res)
+
+                _etag = an_res['_items'][0]['_etag']
+
+                create_analysis_entry(
+                    assay_id,
+                    trial_id,
+                    'lloyd',
+                    metadata_path,
+                    run_status,
+                    sample_id,
+                    analysis_id,
+                    _etag
+                )
