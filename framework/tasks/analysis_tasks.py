@@ -7,22 +7,42 @@ import json
 import logging
 import re
 import datetime
-import requests
 import os
+from os import environ as env
+from typing import List
+import time
 from pathlib import Path
+from dotenv import load_dotenv, find_dotenv
+
+from celery import Task
+
+import requests
 from framework.utilities.rabbit_handler import RabbitMQHandler
 from framework.utilities.eve_methods import request_eve_endpoint
 from framework.celery.celery import APP
 from framework.tasks.cromwell_tasks import run_subprocess_with_logs
+from framework.tasks.cromwell_tasks import AuthorizedTask
 
+import constants
 
 LOGGER = logging.getLogger('taskmanager')
 LOGGER.setLevel(logging.DEBUG)
 # RABBIT = RabbitMQHandler('amqp://rabbitmq')
 # LOGGER.addHandler(RABBIT)
 
+ENV_FILE = find_dotenv()
+if ENV_FILE:
+    load_dotenv(ENV_FILE)
 
-def fetch_eve_or_fail(token, endpoint, data, code, method='POST'):
+DOMAIN = env.get(constants.DOMAIN)
+CLIENT_SECRET = env.get(constants.CLIENT_SECRET)
+CLIENT_ID = env.get(constants.CLIENT_ID)
+AUDIENCE = env.get(constants.AUDIENCE)
+
+
+def fetch_eve_or_fail(
+    token: str, endpoint: str, data: dict, code: int, method: str='POST'
+) -> dict:
     """
     Method for fetching results from eve with a fail safe
 
@@ -41,7 +61,7 @@ def fetch_eve_or_fail(token, endpoint, data, code, method='POST'):
     response = request_eve_endpoint(token, data, endpoint, method)
     if not response.status_code == code:
         error_string = "There was a problem with your request: "
-        if (response.json):
+        if response.json:
             error_string += json.dumps(response.json())
         else:
             error_string += response.reason
@@ -50,7 +70,7 @@ def fetch_eve_or_fail(token, endpoint, data, code, method='POST'):
     return response.json()
 
 
-def fetch_pipelines_bucket():
+def fetch_pipelines_bucket() -> None:
     """
     Copies the cidc-pipelines bucket to local.
     """
@@ -65,7 +85,7 @@ def fetch_pipelines_bucket():
     run_subprocess_with_logs(copy_wdl_args, "Copied pipelines folder")
 
 
-def dict_list_to_dict(list_of_dicts):
+def dict_list_to_dict(list_of_dicts: List[dict]) -> dict:
     """
     Helper method to turn a list of dicts into one dict
 
@@ -82,19 +102,21 @@ def dict_list_to_dict(list_of_dicts):
     return new_dictionary
 
 
-def create_analysis_entry(
-        assay,
-        trial,
-        username,
-        metadata_path,
-        status,
-        sample_id,
-        analysis_id,
-        _etag):
+def create_analysis_entry(record, metadata_path, status, _etag, token):
+    """[summary]
+
+    Arguments:
+        record {[type]} -- [description]
+        metadata_path {[type]} -- [description]
+        status {[type]} -- [description]
+        _etag {[type]} -- [description]
+        token {[type]} -- [description]
+
+    Returns:
+        [type] -- [description]
+    """
 
     stat = "Completed" if status else "Aborted"
-
-    print("Create analysis entry called")
 
     payload_object = {
         'files_generated': [],
@@ -111,11 +133,8 @@ def create_analysis_entry(
         # Parse file string to JSON
         string_meta = metadata.read()
         payload_object['metadata_blob'] = string_meta
-        json_meta = json.loads(string_meta)
-        outputs = json_meta['outputs']
-
-        file_regex = r'gs://'
-        pattern = re.compile(file_regex)
+        outputs = json.loads(string_meta)['outputs']
+        pattern = re.compile(r'gs://')
 
         for key, value in outputs.items():
             if re.search(pattern, str(value)):
@@ -126,187 +145,36 @@ def create_analysis_entry(
                 data_to_upload.append({
                     'file_name': key,
                     'gs_uri': value,
-                    'sample_id': sample_id,
-                    'trial': trial,
-                    'assay': assay,
-                    'analysis_id': analysis_id,
+                    'sample_id': record['sample_id'],
+                    'trial': record['trial_id'],
+                    'assay': record['assay_id'],
+                    'analysis_id': record['analysis_id'],
                     'date_created': str(datetime.datetime.now().isoformat())
                 })
     # Insert the analysis object
 
     patch_res = requests.patch(
-        "http://ingestion-api:5000/analysis/" + analysis_id,
+        "http://ingestion-api:5000/analysis/" + record['analysis_id'],
         json=payload_object,
         headers={
             "If-Match": _etag,
-            "Authorization": 'testing_token'
+            "Authorization": token
         }
     )
 
     if not patch_res.status_code == 200 and not patch_res.status_code == 201:
         print("Error communicating with eve: " + patch_res.reason)
-        if (patch_res.json()):
+        if patch_res.json():
             print(patch_res.json())
 
     # Insert data
-    data_response = fetch_eve_or_fail('testing_token', 'data', data_to_upload, 201)
-
-    print('Got down here')
-    return data_response
+    return fetch_eve_or_fail(token, 'data', data_to_upload, 201)
 
 
-@APP.task
-def run_bwa_pipeline(trial, assay, username, analysis_id, _etag, samples=None):
-    query_string = "assays/%s" % (assay)
-    data_response = request_eve_endpoint('testing_token', None, query_string, 'GET')
-
-    if not data_response.status_code == 200:
-        print(data_response.reason)
-        LOGGER.error(data_response.reason)
-        return
-
-    data_json = data_response.json()
-    wdl_path = data_json['wdl_location']
-    static_inputs = data_json['static_inputs']
-
-    # Query the data and organize it into pairs
-    aggregate_query = {"$trial": trial, "$assay": assay}
-    query_string = "data/query?aggregate=%s" % (json.dumps(aggregate_query))
-    record_response = request_eve_endpoint('testing_token', None, query_string, 'GET')
-
-    if not record_response.status_code == 200:
-        print(record_response.reason)
-        return
-
-    record_json = record_response.json()
-    groups = record_json['_items']
-
-    # Make run directory
-    mkdir_args = [
-        "mkdir",
-        "cromwell_run"
-    ]
-    run_subprocess_with_logs(mkdir_args, "Making run directory: ")
-
-    # Copy google cloud config
-    LOGGER.debug('Beginning copy of cloud config file')
-    fetch_cloud_config_args = [
-        "gsutil",
-        "cp",
-        "gs://lloyd-test-pipeline/config/google_cloud.conf",
-        "."
-    ]
-    run_subprocess_with_logs(fetch_cloud_config_args, 'Google config copied: ')
-
-    LOGGER.debug('About to fetch pipelines bucket')
-    fetch_pipelines_bucket()
-    LOGGER.debug('Pipeline bucket fetched')
-
-    for sample_id in groups:
-        if not len(sample_id['records']) == 2:
-            print('Error for sample: ' + sample_id['_id'] + ' not a valid pair of files')
-        else:
-            # Add input variables
-            new_dictionary = {}
-
-            # Merges the list of dictionaries into one dictionary.
-            for entry in static_inputs:
-                new_dictionary[entry['key_name']] = entry['key_value']
-
-            # Determine Which File is which based on ending
-            pattern1 = re.compile('_1\\.')
-            pattern2 = re.compile('_2\\.')
-
-            for record in sample_id['records']:
-                if pattern1.search(record['file_name']):
-                    new_dictionary['run_alignment.fastq1'] = record['gs_uri']
-                elif pattern2.search(record['file_name']):
-                    new_dictionary['run_alignment.fastq2'] = record['gs_uri']
-                else:
-                    print("ERROR NAMING CONVENTIONS NOT FOLLOWED")
-                    raise RuntimeError("Pair naming error" + record['file_name'])
-
-            # Create input.json file
-            input_string = json.dumps(new_dictionary)
-            print(input_string)
-            with open("cromwell_run/inputs.json", "w") as input_file:
-                input_file.write(input_string)
-
-            # Construct cromwell arguments
-            cromwell_args = [
-                'java',
-                '-Dconfig.file=../google_cloud.conf',
-                '-jar',
-                '../cromwell-30.2.jar',
-                'run',
-                wdl_path,
-                '-i',
-                '../cromwell_run/inputs.json',
-                "-m",
-                "../cromwell_run/metadata"
-            ]
-            LOGGER.debug('Starting cromwell run')
-
-            # Launch run
-            run_subprocess_with_logs(
-                cromwell_args, 'Cromwell run succeeded', 'utf-8', "cidc-pipelines"
-            )
-
-            LOGGER.debug("Cromwell run finished")
-
-            # Gather metadata
-            run_status = True if Path('./cromwell_run/metadata').is_file else False
-
-            create_analysis_entry(
-                assay,
-                trial,
-                str(username),
-                "./cromwell_run/metadata",
-                run_status,
-                sample_id['_id'],
-                analysis_id,
-                _etag
-            )
-
-
-@APP.task
-def analysis_pipeline():
+def create_file_structure():
     """
-    Start of a universal "check ready" scraper.
+    Creates the necessary directories for cromwell to run.
     """
-
-    assay_projection = {
-        'non_static_inputs': 1,
-        'static_inputs': 1,
-        'wdl_location': 1
-    }
-
-    assay_query_string = "assays?projection=%s" % (json.dumps(assay_projection))
-
-    # Contains a list of all the running assays and their inputs
-    assay_response = fetch_eve_or_fail(
-        'testing_token', assay_query_string, None, 200, 'GET'
-        )['_items']
-
-    # Creates a list of all sought mappings.
-    sought_mappings = [
-        item for sublist in [x['non_static_inputs'] for x in assay_response] for item in sublist
-    ]
-
-    # Query the data and organize it into groupings
-    # The data are grouped into unique groups via trial/assay/sample_id
-    aggregate_query = {'$inputs': sought_mappings}
-    query_string = "data/query?aggregate=%s" % (json.dumps(aggregate_query))
-    record_response = request_eve_endpoint('testing_token', None, query_string, 'GET')
-
-    if not record_response.status_code == 200:
-        print(record_response.reason)
-        return
-
-    record_json = record_response.json()
-    print(record_json)
-    groups = record_json['_items']
-
     # Make run directory
     if not os.path.exists("/cromwell_run"):
         mkdir_args = [
@@ -331,6 +199,48 @@ def analysis_pipeline():
         fetch_pipelines_bucket()
         LOGGER.debug('Pipeline bucket fetched')
 
+
+@APP.task(base=AuthorizedTask)
+def analysis_pipeline():
+    """
+    Start of a universal "check ready" scraper.
+    """
+
+    assay_projection = {
+        'non_static_inputs': 1,
+        'static_inputs': 1,
+        'wdl_location': 1
+    }
+
+    assay_query_string = "assays?projection=%s" % (json.dumps(assay_projection))
+
+    # Contains a list of all the running assays and their inputs
+    assay_response = fetch_eve_or_fail(
+        analysis_pipeline.token['access_token'], assay_query_string, None, 200, 'GET'
+        )['_items']
+
+    # Creates a list of all sought mappings.
+    sought_mappings = [
+        item for sublist in [x['non_static_inputs'] for x in assay_response] for item in sublist
+    ]
+
+    # Query the data and organize it into groupings
+    # The data are grouped into unique groups via trial/assay/sample_id
+    aggregate_query = {'$inputs': sought_mappings}
+    query_string = "data/query?aggregate=%s" % (json.dumps(aggregate_query))
+    record_response = request_eve_endpoint(
+        analysis_pipeline.token['access_token'], None, query_string, 'GET'
+    )
+
+    if not record_response.status_code == 200:
+        print(record_response.reason)
+        return
+
+    groups = record_response.json()['_items']
+
+    # Create file directory.
+    create_file_structure()
+
     # Loop over each assay, and check for sample_id groups that
     # fulfill the input conditions.
     for assay in assay_response:
@@ -344,20 +254,14 @@ def analysis_pipeline():
                 trial_id = sample_assay['_id']['trial']
                 sample_id = sample_assay['_id']['sample_id']
 
-                print(trial_id)
-                print(sample_id)
-                print("^ ids")
-
                 # Figure out why trial id is an array
                 payload1 = {
-                    'started_by': 'lloyd',
                     'trial': str(trial_id[0]),
                     'assay': str(assay_id),
                     'samples': [str(sample_id)]
                 }
 
                 res_json = fetch_eve_or_fail('testing_token', 'analysis', payload1, 201)
-                print("Caching ID" + res_json['_id'])
                 analysis_id = res_json['_id']
 
                 input_dictionary = {}
@@ -368,15 +272,13 @@ def analysis_pipeline():
                 for record in sample_assay['records']:
                     input_dictionary[record['mapping']] = record['gs_uri']
 
-                input_as_string = json.dumps(input_dictionary)
-
                 with open("cromwell_run/" + assay["_id"] + "_inputs.json", "w") as input_file:
-                    input_file.write(input_as_string)
+                    input_file.write(json.dumps(input_dictionary))
 
                 metadata_path = '../cromwell_run/' + assay['_id'] + '_metadata'
-                
+
                 # Construct cromwell arguments
-                cromwell_args = [
+                cromwell_args = [ 
                     'java',
                     '-Dconfig.file=../google_cloud.conf',
                     '-jar',
@@ -400,26 +302,25 @@ def analysis_pipeline():
                 # Gather metadata
                 run_status = True if Path(
                     metadata_path
-                    ).is_file else False
+                ).is_file else False
 
-                payload = {
-                    '_id': analysis_id
-                }
-
-                an_res = fetch_eve_or_fail('testing_token', 'analysis', payload, 200, 'GET')
-
-                print('fetching analysis etag')
-                print(an_res)
-
+                payload = {'_id': analysis_id}
+                an_res = fetch_eve_or_fail(
+                    analysis_pipeline.token['access_token'], 'analysis', payload, 200, 'GET'
+                )
                 _etag = an_res['_items'][0]['_etag']
 
+                record = {
+                    'assay_id': assay_id,
+                    'trial_id': trial_id,
+                    'sample_id': sample_id,
+                    'analysis_id': analysis_id
+                }
+
                 create_analysis_entry(
-                    assay_id,
-                    trial_id,
-                    'lloyd',
+                    record,
                     metadata_path,
                     run_status,
-                    sample_id,
-                    analysis_id,
-                    _etag
+                    _etag,
+                    analysis_pipeline.token['access_token']
                 )

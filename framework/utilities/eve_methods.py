@@ -34,5 +34,5 @@ def request_eve_endpoint(eve_token, payload_data, endpoint, method='POST'):
     return request_func(
         "http://ingestion-api:5000" + "/" + endpoint,
         json=payload_data,
-        headers={"Authorization": 'token {}'.format(eve_token)}
+        headers={"Authorization": 'Bearer {}'.format(eve_token)}
     )

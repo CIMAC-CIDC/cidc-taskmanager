@@ -6,55 +6,81 @@ Simple celery example
 import subprocess
 import json
 import re
+import time
 import os
+from os import environ as env
 import logging
 import requests
 import datetime
 from uuid import uuid4
+from dotenv import load_dotenv, find_dotenv
+from celery import Task
 from framework.utilities.rabbit_handler import RabbitMQHandler
 from framework.utilities.eve_methods import request_eve_endpoint
 from framework.celery.celery import APP
 
+import constants
 
 LOGGER = logging.getLogger('taskmanager')
 LOGGER.setLevel(logging.DEBUG)
 # RABBIT = RabbitMQHandler('amqp://rabbitmq')
 # LOGGER.addHandler(RABBIT)
 
+ENV_FILE = find_dotenv()
+if ENV_FILE:
+    load_dotenv(ENV_FILE)
 
-def inject_google_zones(valid_zones, wdl_directory):
-    """
-    Injects WDL files with the list of google zones specified
+DOMAIN = env.get(constants.DOMAIN)
+CLIENT_SECRET = env.get(constants.CLIENT_SECRET)
+CLIENT_ID = env.get(constants.CLIENT_ID)
+AUDIENCE = env.get(constants.AUDIENCE)
 
-    Arguments:
-        valid_zones {[str]} -- string list of valid zones for google compute engines to be launched
-        wdl_directory {str} -- directory path to wdl files
+
+def get_token() -> None:
     """
-    zone_string = " ".join(valid_zones)
-    # loop over wdl files
-    for wdl in os.listdir(wdl_directory):
-        with open(wdl_directory + "/" + wdl, 'r') as open_wdl:
-            file_contents = open_wdl.read()
-            # check if they are missing zone string
-            if re.search(r'runtime', file_contents) and not re.search(r'zones:', file_contents):
-                log_string = 'File: ' + wdl + 'does not have a zones argument, inserting...'
-                LOGGER.info(log_string)
-                with open(wdl_directory + "/" + wdl, 'r') as bad_wdl:
-                    # if so, read them line by line into a temporary file
-                    tmp_file = open(wdl_directory + "/" + 'tmp_' + wdl, 'a')
-                    for line in bad_wdl:
-                        # if that line is "runtime"
-                        if re.search(r'runtime', line):
-                            # write the zone string
-                            spacing = ' ' * (2 * (line.count(' ') - 1))
-                            tmp_file.write(line)
-                            tmp_file.write(spacing + 'zones: ' + zone_string + '\n')
-                        else:
-                            tmp_file.write(line)
-                    # replace the old file with the new one.
-                    os.replace(wdl_directory + "/" + 'tmp_' + wdl, wdl_directory + "/" + wdl)
-                    info_string = 'File: ' + wdl + 'replaced with new file'
-                    LOGGER.info(info_string)
+    Fetches a token from the auth server.
+
+    Returns:
+        dict -- Server response.
+    """
+    payload = {
+        'grant_type': 'client_credentials',
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+        'audience': AUDIENCE
+    }
+    print(AUDIENCE)
+    res = requests.post("https://cidc-test.auth0.com/oauth/token", json=payload)
+
+    if not res.status_code == 200:
+        print("There was a problem getting a token")
+        print(res.reason)
+        if res.json:
+            print(res.json)
+
+    return {
+        'access_token': res.json()['access_token'],
+        'expires_in': res.json()['expires_in'],
+        'time_fetched': time.time()
+    }
+
+
+class AuthorizedTask(Task):
+    _token = None
+
+    @property
+    def token(self):
+        """
+        Defines the google access token for the class.
+
+        Returns:
+            dict -- Access response dictionary with key, ttl, time.
+        """
+        if self._token is None:
+            self._token = get_token()
+        elif time.time() - self._token['time_fetched'] > self._token['expires_in']:
+            self._token = get_token()
+        return self._token
 
 
 def run_subprocess_with_logs(cl_args, message, encoding='utf-8', cwd="."):
@@ -73,7 +99,7 @@ def run_subprocess_with_logs(cl_args, message, encoding='utf-8', cwd="."):
         LOGGER.error(error_string)
 
 
-@APP.task
+@APP.task(base=AuthorizedTask)
 def move_files_from_staging(upload_record, google_path):
     """Function that moves a file from staging to permanent storage
 
@@ -107,13 +133,14 @@ def move_files_from_staging(upload_record, google_path):
         print(record)
 
     # when move is completed, insert data objects
-    response = request_eve_endpoint('testing_token', files, 'data')
+    print(move_files_from_staging.token)
+    response = request_eve_endpoint(move_files_from_staging.token['access_token'], files, 'data')
 
     if not response.status_code == 201:
         print("Error creating data entries, exiting")
         print(response.reason)
         if response.json:
-            print(response.json())
+            print(response.json)
         return
 
 

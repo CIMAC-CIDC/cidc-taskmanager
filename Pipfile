@@ -13,6 +13,7 @@ python-logstash = "*"
 kombu = "*"
 nose = "*"
 requests = "*"
+python-dotenv = "*"
 
 
 [dev-packages]
