@@ -9,15 +9,12 @@ import re
 import datetime
 import os
 from os import environ as env
-from typing import List
-import time
+from typing import List, Tuple
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 
-from celery import Task
-
 import requests
-from framework.utilities.rabbit_handler import RabbitMQHandler
+# from framework.utilities.rabbit_handler import RabbitMQHandler
 from framework.utilities.eve_methods import request_eve_endpoint
 from framework.celery.celery import APP
 from framework.tasks.cromwell_tasks import run_subprocess_with_logs
@@ -41,7 +38,7 @@ AUDIENCE = env.get(constants.AUDIENCE)
 
 
 def fetch_eve_or_fail(
-    token: str, endpoint: str, data: dict, code: int, method: str='POST'
+        token: str, endpoint: str, data: dict, code: int, method: str='POST'
 ) -> dict:
     """
     Method for fetching results from eve with a fail safe
@@ -102,18 +99,21 @@ def dict_list_to_dict(list_of_dicts: List[dict]) -> dict:
     return new_dictionary
 
 
-def create_analysis_entry(record, metadata_path, status, _etag, token):
-    """[summary]
+def create_analysis_entry(
+        record: dict, metadata_path: str, status: bool, _etag: str, token: str
+) -> dict:
+    """
+    Updates the analysis entry with the information from the completed run.
 
     Arguments:
-        record {[type]} -- [description]
-        metadata_path {[type]} -- [description]
-        status {[type]} -- [description]
-        _etag {[type]} -- [description]
-        token {[type]} -- [description]
+        record {dict} -- Contextual information about the run.
+        metadata_path {str} -- Path to cromwell metadata file.
+        status {bool} -- Whether the run completed or aborted.
+        _etag {str} -- Etag value for patching.
+        token {str} -- Access token.
 
     Returns:
-        [type] -- [description]
+        dict -- response data from the API.
     """
 
     stat = "Completed" if status else "Aborted"
@@ -200,12 +200,14 @@ def create_file_structure():
         LOGGER.debug('Pipeline bucket fetched')
 
 
-@APP.task(base=AuthorizedTask)
-def analysis_pipeline():
+def check_for_runs() -> Tuple[requests.Response, requests.Response]:
     """
-    Start of a universal "check ready" scraper.
-    """
+    Queries data collection and compares with assay requirements.
+    If any runs are ready, sends out appropriate data.
 
+    Returns:
+        requests.Response -- Response containing data.
+    """
     assay_projection = {
         'non_static_inputs': 1,
         'static_inputs': 1,
@@ -236,6 +238,16 @@ def analysis_pipeline():
         print(record_response.reason)
         return
 
+    return record_response, assay_response
+
+
+@APP.task(base=AuthorizedTask)
+def analysis_pipeline():
+    """
+    Start of a universal "check ready" scraper.
+    """
+
+    record_response, assay_response = check_for_runs()
     groups = record_response.json()['_items']
 
     # Create file directory.
@@ -278,7 +290,7 @@ def analysis_pipeline():
                 metadata_path = '../cromwell_run/' + assay['_id'] + '_metadata'
 
                 # Construct cromwell arguments
-                cromwell_args = [ 
+                cromwell_args = [
                     'java',
                     '-Dconfig.file=../google_cloud.conf',
                     '-jar',

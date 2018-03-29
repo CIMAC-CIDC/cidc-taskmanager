@@ -4,18 +4,17 @@ Simple celery example
 """
 
 import subprocess
-import json
-import re
 import time
-import os
-from os import environ as env
 import logging
-import requests
 import datetime
+from os import environ as env
+from typing import List
 from uuid import uuid4
+
+import requests
 from dotenv import load_dotenv, find_dotenv
 from celery import Task
-from framework.utilities.rabbit_handler import RabbitMQHandler
+# from framework.utilities.rabbit_handler import RabbitMQHandler
 from framework.utilities.eve_methods import request_eve_endpoint
 from framework.celery.celery import APP
 
@@ -49,7 +48,6 @@ def get_token() -> None:
         'client_secret': CLIENT_SECRET,
         'audience': AUDIENCE
     }
-    print(AUDIENCE)
     res = requests.post("https://cidc-test.auth0.com/oauth/token", json=payload)
 
     if not res.status_code == 200:
@@ -66,6 +64,13 @@ def get_token() -> None:
 
 
 class AuthorizedTask(Task):
+    """
+    Subclass of the Task type, exists to allow sharing of access tokens
+    between workers.
+
+    Arguments:
+        Task {Task} -- Celery task class
+    """
     _token = None
 
     @property
@@ -83,16 +88,20 @@ class AuthorizedTask(Task):
         return self._token
 
 
-def run_subprocess_with_logs(cl_args, message, encoding='utf-8', cwd="."):
+def run_subprocess_with_logs(
+        cl_args: List[str], message: str, encoding: str='utf-8', cwd: str="."
+) -> None:
     """
     Runs a subprocess command and logs the output.
 
     Arguments:
-        cl_args {[string]} -- List of string inputs to the shell command.
-        message {string} -- Message that will precede output in the log.
-        encoding {string} -- indicates the encoding of the shell command output.
+        cl_args {[str]} -- List of string inputs to the shell command.
+        message {str} -- Message that will precede output in the log.
+        encoding {str} -- indicates the encoding of the shell command output.
+        cwd {str} -- Current working directory.
     """
     try:
+        print(message)
         subprocess.run(cl_args, cwd=cwd)
     except subprocess.CalledProcessError as error:
         error_string = 'Shell command generated error' + str(error.output)
@@ -133,7 +142,6 @@ def move_files_from_staging(upload_record, google_path):
         print(record)
 
     # when move is completed, insert data objects
-    print(move_files_from_staging.token)
     response = request_eve_endpoint(move_files_from_staging.token['access_token'], files, 'data')
 
     if not response.status_code == 201:
@@ -157,77 +165,3 @@ def hello_world(message):
     """
     print(message)
     return message
-
-
-@APP.task
-def run_cromwell(data):
-    """
-    Once files have been uploaded, starts a Cromwell job to process them,
-    then alerts once finished.
-
-    Decorators:
-        APP - Indicates that this is a Celery worker
-
-    Arguments:
-        data {[dict]} - List of dictionary objects with file names and URIs
-    """
-    LOGGER.debug('Cromwell task started')
-    jsonized_data = json.loads(data)
-    input_json = {
-        "run_bwamem.bwamem.index_tar_gz":
-            "gs://lloyd-test-pipeline/reference/hg38.canonical.bwa.tar.gz",
-        "run_bwamem.prefix": "test_hg38",
-        "run_bwamem.fastq1": jsonized_data[0]['google_uri'],
-        "run_bwamem.fastq2": jsonized_data[1]['google_uri'],
-        "run_bwamem.num_cpu": "2",
-        "run_bwamem.gcBias": "1",
-        "run_bwamem.seqBias": "1",
-        "run_bwamem.memory": "4",
-        "run_bwamem.disk_space": "10",
-        "run_bwamem.num_threads": "2",
-        "run_bwamem.boot_disk_gb": "10",
-        "run_bwamem.num_preempt": "1"
-    }
-    input_string = json.dumps(input_json)
-    LOGGER.debug('Finished generating JSON inputs object')
-    LOGGER.debug('Starting copy of WDL files')
-    wdl_subprocess_args = [
-        "gsutil",
-        "cp",
-        "gs://lloyd-test-pipeline/cidc-pipelines-master/wdl/bwa.wdl",
-        "cromwell_run/"
-    ]
-    run_subprocess_with_logs(wdl_subprocess_args, 'Main WDL File copied: ')
-    LOGGER.debug('Beginning copy of Utility WDLs')
-    utility_wdl_subprocess_args = [
-        "gsutil",
-        "cp",
-        "gs://lloyd-test-pipeline/cidc-pipelines-master/wdl/utilities/*",
-        "cromwell_run/"
-    ]
-    run_subprocess_with_logs(utility_wdl_subprocess_args, 'Utility WDLs copied: ')
-    LOGGER.debug('Beginning copy of cloud config file')
-    fetch_cloud_config_args = [
-        "gsutil",
-        "cp",
-        "gs://lloyd-test-pipeline/cidc-pipelines-master/wdl/configs/google_cloud.conf",
-        "cromwell_run/"
-    ]
-    run_subprocess_with_logs(fetch_cloud_config_args, 'Google config copied: ')
-    LOGGER.debug('Beginning generation of input JSON')
-    with open("cromwell_run/inputs.json", "w") as input_file:
-        input_file.write(input_string)
-    LOGGER.debug('Input file generated')
-    cromwell_args = [
-        'java',
-        '-Dconfig.file=cromwell_run/google_cloud.conf',
-        '-jar',
-        'cromwell-30.2.jar',
-        'run',
-        "cromwell_run/bwa.wdl",
-        "-i",
-        "cromwell_run/inputs.json"
-    ]
-    LOGGER.debug('Starting cromwell run')
-    run_subprocess_with_logs(cromwell_args, 'Cromwell run succeeded')
-    return "Succeeded!"
