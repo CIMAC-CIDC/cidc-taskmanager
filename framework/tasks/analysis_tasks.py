@@ -17,8 +17,8 @@ import requests
 # from framework.utilities.rabbit_handler import RabbitMQHandler
 from framework.utilities.eve_methods import request_eve_endpoint
 from framework.celery.celery import APP
-from framework.tasks.cromwell_tasks import run_subprocess_with_logs
-from framework.tasks.cromwell_tasks import AuthorizedTask
+from framework.tasks.cromwell_tasks import run_subprocess_with_logs, AuthorizedTask, \
+    manage_bucket_acl, get_collabs
 
 import constants
 
@@ -59,7 +59,12 @@ def fetch_eve_or_fail(
     if not response.status_code == code:
         error_string = "There was a problem with your request: "
         if response.json:
-            error_string += json.dumps(response.json())
+            try:
+                error_string += json.dumps(response.json())
+            except Exception as exc:
+                print(exc)
+                error_string += response.reason
+                raise RuntimeError(error_string)
         else:
             error_string += response.reason
         LOGGER.error(error_string)
@@ -100,7 +105,7 @@ def dict_list_to_dict(list_of_dicts: List[dict]) -> dict:
 
 
 def create_analysis_entry(
-        record: dict, metadata_path: str, status: bool, _etag: str, token: str
+        record: dict, metadata_path: str, status: bool, _etag: str, token: str, emails: List[str]
 ) -> dict:
     """
     Updates the analysis entry with the information from the completed run.
@@ -111,6 +116,7 @@ def create_analysis_entry(
         status {bool} -- Whether the run completed or aborted.
         _etag {str} -- Etag value for patching.
         token {str} -- Access token.
+        emails: {[str]} -- List of collaborators on the trial. 
 
     Returns:
         dict -- response data from the API.
@@ -137,6 +143,7 @@ def create_analysis_entry(
         pattern = re.compile(r'gs://')
 
         for key, value in outputs.items():
+            manage_bucket_acl('lloyd-test-pipeline', value, emails)
             if re.search(pattern, str(value)):
                 filegen.append({
                     'file_name': key,
@@ -162,10 +169,13 @@ def create_analysis_entry(
         }
     )
 
-    if not patch_res.status_code == 200 and not patch_res.status_code == 201:
+    if not patch_res.status_code == 201:
         print("Error communicating with eve: " + patch_res.reason)
-        if patch_res.json():
-            print(patch_res.json())
+        if patch_res.json:
+            try:
+                print(patch_res.json())
+            except Exception:
+                return None
 
     # Insert data
     return fetch_eve_or_fail(token, 'data', data_to_upload, 201)
@@ -236,9 +246,29 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
 
     if not record_response.status_code == 200:
         print(record_response.reason)
-        return
+        raise RuntimeError('Failed to fetch records')
 
     return record_response, assay_response
+
+
+def create_input_json(sample_assay: dict, assay: dict) -> None:
+    """
+    Constructs the input.json file to run the pipeline.
+
+    Arguments:
+        sample_assay {dict} -- Record representing a group of files with the same sampleID
+        assay {dict} -- Record entry for the assay being run.
+    """
+    input_dictionary = {}
+    # Map inputs to make inputs.json file
+    for entry in assay['static_inputs']:
+        input_dictionary[entry['key_name']] = entry['key_value']
+
+    for record in sample_assay['records']:
+        input_dictionary[record['mapping']] = record['gs_uri']
+
+    with open("cromwell_run/" + assay["_id"] + "_inputs.json", "w") as input_file:
+        input_file.write(json.dumps(input_dictionary))
 
 
 @APP.task(base=AuthorizedTask)
@@ -257,7 +287,6 @@ def analysis_pipeline():
     # fulfill the input conditions.
     for assay in assay_response:
         non_static_inputs = assay['non_static_inputs']
-        wdl_path = assay['wdl_location']
         for sample_assay in groups:
             if sample_assay['_id']['assay'] == assay['_id'] \
                     and len(sample_assay['records']) == len(non_static_inputs):
@@ -266,27 +295,25 @@ def analysis_pipeline():
                 trial_id = sample_assay['_id']['trial']
                 sample_id = sample_assay['_id']['sample_id']
 
-                # Figure out why trial id is an array
+                print(trial_id)
+                # Figure out why trial id is an array.
                 payload1 = {
                     'trial': str(trial_id[0]),
                     'assay': str(assay_id),
                     'samples': [str(sample_id)]
                 }
 
-                res_json = fetch_eve_or_fail('testing_token', 'analysis', payload1, 201)
-                analysis_id = res_json['_id']
+                print(payload1)
 
-                input_dictionary = {}
-                # Map inputs to make inputs.json file
-                for entry in assay['static_inputs']:
-                    input_dictionary[entry['key_name']] = entry['key_value']
+                # Create analysis entry.
+                res_json = fetch_eve_or_fail(
+                    analysis_pipeline.token['access_token'], 'analysis', payload1, 201
+                )
 
-                for record in sample_assay['records']:
-                    input_dictionary[record['mapping']] = record['gs_uri']
+                # Create inputs.json file.
+                create_input_json(sample_assay, assay)
 
-                with open("cromwell_run/" + assay["_id"] + "_inputs.json", "w") as input_file:
-                    input_file.write(json.dumps(input_dictionary))
-
+                # Generate unique name for metadata file.
                 metadata_path = '../cromwell_run/' + assay['_id'] + '_metadata'
 
                 # Construct cromwell arguments
@@ -296,7 +323,7 @@ def analysis_pipeline():
                     '-jar',
                     '../cromwell-30.2.jar',
                     'run',
-                    wdl_path,
+                    assay['wdl_location'],
                     '-i',
                     '../cromwell_run/' + assay['_id'] + '_inputs.json',
                     "-m",
@@ -312,15 +339,11 @@ def analysis_pipeline():
                 LOGGER.debug("Cromwell run finished")
 
                 # Gather metadata
-                run_status = True if Path(
-                    metadata_path
-                ).is_file else False
-
+                analysis_id = res_json['_id']
                 payload = {'_id': analysis_id}
                 an_res = fetch_eve_or_fail(
                     analysis_pipeline.token['access_token'], 'analysis', payload, 200, 'GET'
                 )
-                _etag = an_res['_items'][0]['_etag']
 
                 record = {
                     'assay_id': assay_id,
@@ -329,10 +352,14 @@ def analysis_pipeline():
                     'analysis_id': analysis_id
                 }
 
+                collabs = get_collabs(trial_id, analysis_pipeline.token['access_token'])
+                emails = collabs['_items'][0]['collaborators']
+
                 create_analysis_entry(
                     record,
                     metadata_path,
-                    run_status,
-                    _etag,
-                    analysis_pipeline.token['access_token']
+                    True if Path(metadata_path).is_file else False,
+                    an_res['_items'][0]['_etag'],
+                    analysis_pipeline.token['access_token'],
+                    emails
                 )

@@ -5,6 +5,7 @@ Simple celery example
 
 import subprocess
 import time
+import json
 import logging
 import datetime
 from os import environ as env
@@ -12,6 +13,7 @@ from typing import List
 from uuid import uuid4
 
 import requests
+from google.cloud import storage
 from dotenv import load_dotenv, find_dotenv
 from celery import Task
 # from framework.utilities.rabbit_handler import RabbitMQHandler
@@ -108,6 +110,46 @@ def run_subprocess_with_logs(
         LOGGER.error(error_string)
 
 
+def get_collabs(trial_id: str, token: str) -> dict:
+    """
+    Gets a list of collaborators given a trial ID
+
+    Arguments:
+        trial_id {str} -- ID of trial.
+        token {str} -- Access token.
+
+    Returns:
+        dict -- Mongo response.
+    """
+    trial = {'_id': trial_id}
+    projection = {'collaborators': 1}
+    query = 'trials?where=%s&projection=%s' % (json.dumps(trial), json.dumps(projection))
+    return request_eve_endpoint(token, None, query, 'GET')
+
+
+def manage_bucket_acl(bucket_name, gs_path, collaborators):
+    """
+    Manages bucket authorization for users.
+
+    Arguments:
+        bucket_name {str} -- [description]
+        gs_path {str} -- [description]
+        collaborators {str} -- [description]
+    """
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    pathname = 'gs://' + bucket_name
+    blob_name = gs_path.replace(pathname, '')[1:]
+    print(blob_name)
+    blob = bucket.blob(blob_name)
+
+    blob.acl.reload()
+    for person in collaborators:
+        blob.acl.user(person).grant_read()
+
+    blob.acl.save()
+
+
 @APP.task(base=AuthorizedTask)
 def move_files_from_staging(upload_record, google_path):
     """Function that moves a file from staging to permanent storage
@@ -139,6 +181,12 @@ def move_files_from_staging(upload_record, google_path):
             record['gs_uri']
         ]
         run_subprocess_with_logs(gs_args, "Moving Files: ")
+
+        # Grant access to files in google storage.
+        collabs = get_collabs(record['trial'], move_files_from_staging.token['access_token'])
+        print(collabs.json())
+        emails = collabs.json()['_items'][0]['collaborators']
+        manage_bucket_acl('lloyd-test-pipeline', record['gs_uri'], emails)
         print(record)
 
     # when move is completed, insert data objects
