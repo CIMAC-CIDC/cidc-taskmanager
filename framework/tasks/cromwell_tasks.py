@@ -6,6 +6,7 @@ Simple celery example
 import subprocess
 import time
 import json
+from json import JSONDecodeError
 import logging
 import datetime
 from os import environ as env
@@ -127,20 +128,19 @@ def get_collabs(trial_id: str, token: str) -> dict:
     return request_eve_endpoint(token, None, query, 'GET')
 
 
-def manage_bucket_acl(bucket_name, gs_path, collaborators):
+def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) -> None:
     """
     Manages bucket authorization for users.
 
     Arguments:
         bucket_name {str} -- [description]
         gs_path {str} -- [description]
-        collaborators {str} -- [description]
+        collaborators {[str]} -- [description]
     """
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
     pathname = 'gs://' + bucket_name
     blob_name = gs_path.replace(pathname, '')[1:]
-    print(blob_name)
     blob = bucket.blob(blob_name)
 
     blob.acl.reload()
@@ -159,6 +159,7 @@ def move_files_from_staging(upload_record, google_path):
 
     Arguments:
         upload_record {[type]} -- [description]
+        google_path {str} -- Path to storage bucket.
     """
     staging_id = upload_record['_id']
     files = upload_record['files']
@@ -184,10 +185,8 @@ def move_files_from_staging(upload_record, google_path):
 
         # Grant access to files in google storage.
         collabs = get_collabs(record['trial'], move_files_from_staging.token['access_token'])
-        print(collabs.json())
         emails = collabs.json()['_items'][0]['collaborators']
         manage_bucket_acl('lloyd-test-pipeline', record['gs_uri'], emails)
-        print(record)
 
     # when move is completed, insert data objects
     response = request_eve_endpoint(move_files_from_staging.token['access_token'], files, 'data')
@@ -195,8 +194,10 @@ def move_files_from_staging(upload_record, google_path):
     if not response.status_code == 201:
         print("Error creating data entries, exiting")
         print(response.reason)
-        if response.json:
-            print(response.json)
+        try:
+            print(response.json())
+        except JSONDecodeError:
+            print('no valid JSON in response')
         return
 
 

@@ -3,19 +3,19 @@
 Simple celery example
 """
 
+import datetime
 import json
+from json import JSONDecodeError
 import logging
 import re
-import datetime
-import os
-from os import environ as env
+import time
+from os import environ as env, path
 from typing import List, Tuple
-from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 
 import requests
 # from framework.utilities.rabbit_handler import RabbitMQHandler
-from framework.utilities.eve_methods import request_eve_endpoint
+from framework.utilities.eve_methods import request_eve_endpoint, smart_fetch
 from framework.celery.celery import APP
 from framework.tasks.cromwell_tasks import run_subprocess_with_logs, AuthorizedTask, \
     manage_bucket_acl, get_collabs
@@ -72,21 +72,6 @@ def fetch_eve_or_fail(
     return response.json()
 
 
-def fetch_pipelines_bucket() -> None:
-    """
-    Copies the cidc-pipelines bucket to local.
-    """
-    # gs://lloyd-test-pipeline/cidc-pipelines/wdl
-    copy_wdl_args = [
-        "gsutil",
-        "cp",
-        "-r",
-        "gs://lloyd-test-pipeline/cidc-pipelines/",
-        "."
-    ]
-    run_subprocess_with_logs(copy_wdl_args, "Copied pipelines folder")
-
-
 def dict_list_to_dict(list_of_dicts: List[dict]) -> dict:
     """
     Helper method to turn a list of dicts into one dict
@@ -105,25 +90,24 @@ def dict_list_to_dict(list_of_dicts: List[dict]) -> dict:
 
 
 def create_analysis_entry(
-        record: dict, metadata_path: str, status: bool, _etag: str, token: str, emails: List[str]
+        record: dict, run_id: str, status: bool, _etag: str, token: str, emails: List[str]
 ) -> dict:
     """
     Updates the analysis entry with the information from the completed run.
 
     Arguments:
         record {dict} -- Contextual information about the run.
-        metadata_path {str} -- Path to cromwell metadata file.
+        run_id {str} -- Id of the run on Cromwell Server
         status {bool} -- Whether the run completed or aborted.
         _etag {str} -- Etag value for patching.
         token {str} -- Access token.
-        emails: {[str]} -- List of collaborators on the trial. 
+        emails: {[str]} -- List of collaborators on the trial.
 
     Returns:
         dict -- response data from the API.
     """
 
     stat = "Completed" if status else "Aborted"
-
     payload_object = {
         'files_generated': [],
         'status': {
@@ -132,40 +116,46 @@ def create_analysis_entry(
         }
     }
 
+    # If run failed, append logs to record.
+    if not status:
+        url = crom_url('logs', _id=run_id)
+        log_data = smart_fetch(url, method='GET', code=200)
+        payload_object['status']['message'] = json.dumps(log_data)
+
+    cromwell_url = crom_url('metadata', _id=run_id)
+    metadata = smart_fetch(cromwell_url, method='GET', code=200)
     filegen = payload_object['files_generated']
     data_to_upload = []
 
-    with open(metadata_path, "r") as metadata:
-        # Parse file string to JSON
-        string_meta = metadata.read()
-        payload_object['metadata_blob'] = string_meta
-        outputs = json.loads(string_meta)['outputs']
-        pattern = re.compile(r'gs://')
+    # Parse file string to JSON
+    string_meta = json.dumps(metadata)
+    payload_object['metadata_blob'] = string_meta
+    pattern = re.compile(r'gs://')
 
-        for key, value in outputs.items():
-            manage_bucket_acl('lloyd-test-pipeline', value, emails)
-            if re.search(pattern, str(value)):
-                filegen.append({
-                    'file_name': key,
-                    'gs_uri': value
-                })
-                data_to_upload.append({
-                    'file_name': key,
-                    'gs_uri': value,
-                    'sample_id': record['sample_id'],
-                    'trial': record['trial_id'],
-                    'assay': record['assay_id'],
-                    'analysis_id': record['analysis_id'],
-                    'date_created': str(datetime.datetime.now().isoformat())
-                })
+    for key, value in metadata['outputs'].items():
+        manage_bucket_acl('lloyd-test-pipeline', value, emails)
+        if re.search(pattern, str(value)):
+            filegen.append({
+                'file_name': key,
+                'gs_uri': value
+            })
+            data_to_upload.append({
+                'file_name': key,
+                'gs_uri': value,
+                'sample_id': record['sample_id'],
+                'trial': record['trial'],
+                'assay': record['assay'],
+                'analysis_id': record['analysis_id'],
+                'date_created': str(datetime.datetime.now().isoformat())
+            })
+
     # Insert the analysis object
-
     patch_res = requests.patch(
         "http://ingestion-api:5000/analysis/" + record['analysis_id'],
         json=payload_object,
         headers={
             "If-Match": _etag,
-            "Authorization": token
+            "Authorization": 'Bearer {}'.format(token)
         }
     )
 
@@ -174,40 +164,11 @@ def create_analysis_entry(
         if patch_res.json:
             try:
                 print(patch_res.json())
-            except Exception:
+            except JSONDecodeError:
                 return None
 
     # Insert data
     return fetch_eve_or_fail(token, 'data', data_to_upload, 201)
-
-
-def create_file_structure():
-    """
-    Creates the necessary directories for cromwell to run.
-    """
-    # Make run directory
-    if not os.path.exists("/cromwell_run"):
-        mkdir_args = [
-            "mkdir",
-            "cromwell_run"
-        ]
-        run_subprocess_with_logs(mkdir_args, "Making run directory: ")
-
-    # Copy google cloud config
-    if not os.path.exists("google_cloud.conf"):
-        LOGGER.debug('Beginning copy of cloud config file')
-        fetch_cloud_config_args = [
-            "gsutil",
-            "cp",
-            "gs://lloyd-test-pipeline/config/google_cloud.conf",
-            "."
-        ]
-        run_subprocess_with_logs(fetch_cloud_config_args, 'Google config copied: ')
-
-    if not os.path.exists("cidc-pipelines"):
-        LOGGER.debug('About to fetch pipelines bucket')
-        fetch_pipelines_bucket()
-        LOGGER.debug('Pipeline bucket fetched')
 
 
 def check_for_runs() -> Tuple[requests.Response, requests.Response]:
@@ -251,13 +212,16 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
     return record_response, assay_response
 
 
-def create_input_json(sample_assay: dict, assay: dict) -> None:
+def create_input_json(sample_assay: dict, assay: dict) -> dict:
     """
     Constructs the input.json file to run the pipeline.
 
     Arguments:
         sample_assay {dict} -- Record representing a group of files with the same sampleID
         assay {dict} -- Record entry for the assay being run.
+
+    Returns:
+        dict -- Inputs.JSON
     """
     input_dictionary = {}
     # Map inputs to make inputs.json file
@@ -267,8 +231,76 @@ def create_input_json(sample_assay: dict, assay: dict) -> None:
     for record in sample_assay['records']:
         input_dictionary[record['mapping']] = record['gs_uri']
 
-    with open("cromwell_run/" + assay["_id"] + "_inputs.json", "w") as input_file:
-        input_file.write(json.dumps(input_dictionary))
+    return input_dictionary
+
+
+def crom_url(endpoint: str=None, _id: str=None, version: str='v1') -> str:
+    """
+    Generates a URL formatted for the Cromwell Server API
+
+    Keyword Arguments:
+        endpoint {str} -- API Endpoint (default: {None})
+        _id {str} -- Run ID (default: {None})
+        version {str} -- version (default: {'v1'})
+
+    Returns:
+        str -- [description]
+    """
+    url = 'cromwell-server:8000/api/workflows/' + version + '/'
+    if _id:
+        url += _id + '/'
+    if endpoint:
+        url += endpoint
+    return url
+
+
+def start_cromwell_flows(assay_response, groups):
+    """
+    Registers a cromwell run, and sends it to the API.
+
+    Arguments:
+        assay_response {[type]} -- [description]
+        groups {[type]} -- [description]
+    """
+    # For each registered trial/assay, check if there is data that can be run.
+    response_arr = []
+    for assay in assay_response:
+        for sample_assay in groups:
+            if sample_assay['_id']['assay'] == assay['_id'] \
+                    and len(sample_assay['records']) == len(assay['non_static_inputs']):
+
+                assay_id = assay['_id']
+                trial_id = sample_assay['_id']['trial']
+                sample_id = sample_assay['_id']['sample_id']
+
+                # Figure out why trial id is an array.
+                payload = {
+                    'trial': str(trial_id),
+                    'assay': str(assay_id),
+                    'samples': [str(sample_id)]
+                }
+
+                # Create analysis entry.
+                res_json = fetch_eve_or_fail(
+                    analysis_pipeline.token['access_token'], 'analysis', payload, 201
+                )
+                payload['analysis_id'] = res_json['_id']
+
+                # Create inputs.json file.
+                inputs_json = json.dumps(create_input_json(sample_assay, assay)).encode('utf-8')
+                files = {
+                    'workflowSource': open(assay['wdl_location'], 'rb'),
+                    'workflowInputs': inputs_json
+                }
+                url = crom_url()
+
+                response_arr.append({
+                    'api_response': smart_fetch(url, params=inputs_json, code=201, files=files),
+                    'analysis_etag': res_json['_etag'],
+                    'record': payload
+                })
+
+    return response_arr
 
 
 @APP.task(base=AuthorizedTask)
@@ -276,90 +308,43 @@ def analysis_pipeline():
     """
     Start of a universal "check ready" scraper.
     """
-
+    # Check if any runs are ready.
     record_response, assay_response = check_for_runs()
-    groups = record_response.json()['_items']
 
-    # Create file directory.
-    create_file_structure()
+    # If they are, send them to cromwell to start.
+    active_runs = start_cromwell_flows(assay_response, record_response.json()['_items'])
 
-    # Loop over each assay, and check for sample_id groups that
-    # fulfill the input conditions.
-    for assay in assay_response:
-        non_static_inputs = assay['non_static_inputs']
-        for sample_assay in groups:
-            if sample_assay['_id']['assay'] == assay['_id'] \
-                    and len(sample_assay['records']) == len(non_static_inputs):
+    # Poll for active runs until completed.
+    while active_runs:
+        time.sleep(5)
+        print('polling')
+        LOGGER.debug('polling')
+        filter_runs = []
 
-                assay_id = assay['_id']
-                trial_id = sample_assay['_id']['trial']
-                sample_id = sample_assay['_id']['sample_id']
+        for run in active_runs:
+            run_id = run['api_response']['id']
+            record = run['record']
 
-                print(trial_id)
-                # Figure out why trial id is an array.
-                payload1 = {
-                    'trial': str(trial_id[0]),
-                    'assay': str(assay_id),
-                    'samples': [str(sample_id)]
-                }
+            # Poll status.
+            response = smart_fetch(
+                crom_url('status', _id=run_id), method='GET', code=200)['status']
 
-                print(payload1)
+            # Fetch collaborators to control access.
+            collabs = get_collabs(record['trial'], analysis_pipeline.token['access_token'])
+            emails = collabs['_items'][0]['collaborators']
 
-                # Create analysis entry.
-                res_json = fetch_eve_or_fail(
-                    analysis_pipeline.token['access_token'], 'analysis', payload1, 201
-                )
-
-                # Create inputs.json file.
-                create_input_json(sample_assay, assay)
-
-                # Generate unique name for metadata file.
-                metadata_path = '../cromwell_run/' + assay['_id'] + '_metadata'
-
-                # Construct cromwell arguments
-                cromwell_args = [
-                    'java',
-                    '-Dconfig.file=../google_cloud.conf',
-                    '-jar',
-                    '../cromwell-30.2.jar',
-                    'run',
-                    assay['wdl_location'],
-                    '-i',
-                    '../cromwell_run/' + assay['_id'] + '_inputs.json',
-                    "-m",
-                    metadata_path
-                ]
-                LOGGER.debug('Starting cromwell run')
-
-                # Launch run
-                run_subprocess_with_logs(
-                    cromwell_args, 'Cromwell run succeeded', 'utf-8', "cidc-pipelines"
-                )
-
-                LOGGER.debug("Cromwell run finished")
-
-                # Gather metadata
-                analysis_id = res_json['_id']
-                payload = {'_id': analysis_id}
-                an_res = fetch_eve_or_fail(
-                    analysis_pipeline.token['access_token'], 'analysis', payload, 200, 'GET'
-                )
-
-                record = {
-                    'assay_id': assay_id,
-                    'trial_id': trial_id,
-                    'sample_id': sample_id,
-                    'analysis_id': analysis_id
-                }
-
-                collabs = get_collabs(trial_id, analysis_pipeline.token['access_token'])
-                emails = collabs['_items'][0]['collaborators']
-
+            # If run has finished, make a record.
+            if response not in ['Submitted', 'Running']:
                 create_analysis_entry(
                     record,
-                    metadata_path,
-                    True if Path(metadata_path).is_file else False,
-                    an_res['_items'][0]['_etag'],
+                    run_id,
+                    response == 'Succeeded',
+                    run['_etag'],
                     analysis_pipeline.token['access_token'],
                     emails
                 )
+                # Add run to filter list.
+                filter_runs.append(run)
+
+        # Filter finished runs out.
+        active_runs = [x for x in active_runs if x not in filter_runs]
