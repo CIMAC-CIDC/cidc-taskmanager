@@ -246,11 +246,11 @@ def crom_url(endpoint: str=None, _id: str=None, version: str='v1') -> str:
     Returns:
         str -- [description]
     """
-    url = 'cromwell-server:8000/api/workflows/' + version + '/'
+    url = 'http://cromwell-server:8000/api/workflows/' + version
     if _id:
-        url += _id + '/'
+        url += '/' + _id
     if endpoint:
-        url += endpoint
+        url += '/' + endpoint
     return url
 
 
@@ -287,15 +287,13 @@ def start_cromwell_flows(assay_response, groups):
                 payload['analysis_id'] = res_json['_id']
 
                 # Create inputs.json file.
-                inputs_json = json.dumps(create_input_json(sample_assay, assay)).encode('utf-8')
                 files = {
                     'workflowSource': open(assay['wdl_location'], 'rb'),
-                    'workflowInputs': inputs_json
+                    'workflowInputs': json.dumps(create_input_json(sample_assay, assay)).encode('utf-8')
                 }
                 url = crom_url()
-
                 response_arr.append({
-                    'api_response': smart_fetch(url, params=inputs_json, code=201, files=files),
+                    'api_response': smart_fetch(url, code=201, files=files, method='POST'),
                     'analysis_etag': res_json['_etag'],
                     'record': payload
                 })
