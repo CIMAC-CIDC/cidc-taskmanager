@@ -9,16 +9,15 @@ from json import JSONDecodeError
 import logging
 import re
 import time
-from os import environ as env, path
+from os import environ as env
 from typing import List, Tuple
 from dotenv import load_dotenv, find_dotenv
+from cidc_utils.requests import SmartFetch
 
 import requests
 # from framework.utilities.rabbit_handler import RabbitMQHandler
-from framework.utilities.eve_methods import request_eve_endpoint, smart_fetch
 from framework.celery.celery import APP
-from framework.tasks.cromwell_tasks import run_subprocess_with_logs, AuthorizedTask, \
-    manage_bucket_acl, get_collabs
+from framework.tasks.cromwell_tasks import AuthorizedTask, manage_bucket_acl, get_collabs
 
 import constants
 
@@ -35,58 +34,10 @@ DOMAIN = env.get(constants.DOMAIN)
 CLIENT_SECRET = env.get(constants.CLIENT_SECRET)
 CLIENT_ID = env.get(constants.CLIENT_ID)
 AUDIENCE = env.get(constants.AUDIENCE)
-
-
-def fetch_eve_or_fail(
-        token: str, endpoint: str, data: dict, code: int, method: str='POST'
-) -> dict:
-    """
-    Method for fetching results from eve with a fail safe
-
-    Arguments:
-        token {string} -- access token
-        endpoint {string} -- endpoint data is being inserted into
-        data {dict} -- payload data to be uploaded
-        code {int} -- expected status code of the response
-
-    Keyword Arguments:
-        method {str} -- HTTP method (default: {'POST'})
-
-    Returns:
-        dict -- json formatted response from eve
-    """
-    response = request_eve_endpoint(token, data, endpoint, method)
-    if not response.status_code == code:
-        error_string = "There was a problem with your request: "
-        if response.json:
-            try:
-                error_string += json.dumps(response.json())
-            except Exception as exc:
-                print(exc)
-                error_string += response.reason
-                raise RuntimeError(error_string)
-        else:
-            error_string += response.reason
-        LOGGER.error(error_string)
-        raise RuntimeError(error_string)
-    return response.json()
-
-
-def dict_list_to_dict(list_of_dicts: List[dict]) -> dict:
-    """
-    Helper method to turn a list of dicts into one dict
-
-    Arguments:
-        list_of_dicts {[dict]} -- list of dictionaries
-
-    Returns:
-        dict -- New dictionary made of the other dictionaries.
-    """
-    new_dictionary = {}
-    for dictionary in list_of_dicts:
-        for key, value in dictionary.items():
-            new_dictionary.setdefault(key, value)
-    return new_dictionary
+EVE_URL = env.get(constants.EVE_URL)
+CROMWELL_URL = env.get(constants.CROMWELL_URL)
+EVE_FETCHER = SmartFetch(EVE_URL)
+CROMWELL_FETCHER = SmartFetch(CROMWELL_URL)
 
 
 def create_analysis_entry(
@@ -118,12 +69,12 @@ def create_analysis_entry(
 
     # If run failed, append logs to record.
     if not status:
-        url = crom_url('logs', _id=run_id)
-        log_data = smart_fetch(url, method='GET', code=200)
+        endpoint = run_id + '/' + 'logs'
+        log_data = CROMWELL_FETCHER.get(endpoint=endpoint).json()
         payload_object['status']['message'] = json.dumps(log_data)
 
-    cromwell_url = crom_url('metadata', _id=run_id)
-    metadata = smart_fetch(cromwell_url, method='GET', code=200)
+    endpoint = run_id + '/' + 'metadata'
+    metadata = CROMWELL_FETCHER.get(endpoint=endpoint).json()
     filegen = payload_object['files_generated']
     data_to_upload = []
 
@@ -168,7 +119,7 @@ def create_analysis_entry(
                 return None
 
     # Insert data
-    return fetch_eve_or_fail(token, 'data', data_to_upload, 201)
+    return EVE_FETCHER.post(token=token, endpoint='data', json=data_to_upload, code=201)
 
 
 def check_for_runs() -> Tuple[requests.Response, requests.Response]:
@@ -188,9 +139,9 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
     assay_query_string = "assays?projection=%s" % (json.dumps(assay_projection))
 
     # Contains a list of all the running assays and their inputs
-    assay_response = fetch_eve_or_fail(
-        analysis_pipeline.token['access_token'], assay_query_string, None, 200, 'GET'
-        )['_items']
+    assay_response = EVE_FETCHER.get(
+        token=analysis_pipeline.token['access_token'], endpoint=assay_query_string, code=200
+    ).json()['_items']
 
     # Creates a list of all sought mappings.
     sought_mappings = [
@@ -201,9 +152,8 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
     # The data are grouped into unique groups via trial/assay/sample_id
     aggregate_query = {'$inputs': sought_mappings}
     query_string = "data/query?aggregate=%s" % (json.dumps(aggregate_query))
-    record_response = request_eve_endpoint(
-        analysis_pipeline.token['access_token'], None, query_string, 'GET'
-    )
+    record_response = EVE_FETCHER.get(
+        token=analysis_pipeline.token['access_token'], endpoint=query_string)
 
     if not record_response.status_code == 200:
         print(record_response.reason)
@@ -234,26 +184,6 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
     return input_dictionary
 
 
-def crom_url(endpoint: str=None, _id: str=None, version: str='v1') -> str:
-    """
-    Generates a URL formatted for the Cromwell Server API
-
-    Keyword Arguments:
-        endpoint {str} -- API Endpoint (default: {None})
-        _id {str} -- Run ID (default: {None})
-        version {str} -- version (default: {'v1'})
-
-    Returns:
-        str -- [description]
-    """
-    url = 'http://cromwell-server:8000/api/workflows/' + version
-    if _id:
-        url += '/' + _id
-    if endpoint:
-        url += '/' + endpoint
-    return url
-
-
 def start_cromwell_flows(assay_response, groups):
     """
     Registers a cromwell run, and sends it to the API.
@@ -281,19 +211,23 @@ def start_cromwell_flows(assay_response, groups):
                 }
 
                 # Create analysis entry.
-                res_json = fetch_eve_or_fail(
-                    analysis_pipeline.token['access_token'], 'analysis', payload, 201
-                )
+                res_json = EVE_FETCHER.post(
+                    token=analysis_pipeline.token['access_token'],
+                    endpoint='analysis',
+                    json=payload,
+                    code=201
+                ).json()
                 payload['analysis_id'] = res_json['_id']
 
                 # Create inputs.json file.
                 files = {
                     'workflowSource': open(assay['wdl_location'], 'rb'),
-                    'workflowInputs': json.dumps(create_input_json(sample_assay, assay)).encode('utf-8')
+                    'workflowInputs': json.dumps(
+                        create_input_json(sample_assay, assay)
+                    ).encode('utf-8')
                 }
-                url = crom_url()
                 response_arr.append({
-                    'api_response': smart_fetch(url, code=201, files=files, method='POST'),
+                    'api_response': CROMWELL_FETCHER.post(code=201, files=files).json(),
                     'analysis_etag': res_json['_etag'],
                     'record': payload
                 })
@@ -315,29 +249,33 @@ def analysis_pipeline():
     # Poll for active runs until completed.
     while active_runs:
         time.sleep(5)
-        print('polling')
         LOGGER.debug('polling')
         filter_runs = []
 
         for run in active_runs:
+            print(run)
             run_id = run['api_response']['id']
             record = run['record']
 
             # Poll status.
-            response = smart_fetch(
-                crom_url('status', _id=run_id), method='GET', code=200)['status']
+            endpoint = run_id + '/' + 'status'
+            response = CROMWELL_FETCHER.get(
+                endpoint=endpoint, method='GET', code=200).json()['status']
 
-            # Fetch collaborators to control access.
-            collabs = get_collabs(record['trial'], analysis_pipeline.token['access_token'])
-            emails = collabs['_items'][0]['collaborators']
+            print(response)
 
             # If run has finished, make a record.
             if response not in ['Submitted', 'Running']:
+
+                # Fetch collaborators to control access.
+                collabs = get_collabs(record['trial'], analysis_pipeline.token['access_token'])
+                emails = collabs.json()['_items'][0]['collaborators']
+
                 create_analysis_entry(
                     record,
                     run_id,
                     response == 'Succeeded',
-                    run['_etag'],
+                    run['analysis_etag'],
                     analysis_pipeline.token['access_token'],
                     emails
                 )

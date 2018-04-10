@@ -6,27 +6,23 @@ Simple celery example
 import subprocess
 import time
 import json
-from json import JSONDecodeError
 import logging
 import datetime
 from os import environ as env
 from typing import List
 from uuid import uuid4
 
-import requests
+
 from google.cloud import storage
 from dotenv import load_dotenv, find_dotenv
 from celery import Task
-# from framework.utilities.rabbit_handler import RabbitMQHandler
-from framework.utilities.eve_methods import request_eve_endpoint
-from framework.celery.celery import APP
+from cidc_utils.requests import SmartFetch
 
+from framework.celery.celery import APP
 import constants
 
 LOGGER = logging.getLogger('taskmanager')
 LOGGER.setLevel(logging.DEBUG)
-# RABBIT = RabbitMQHandler('amqp://rabbitmq')
-# LOGGER.addHandler(RABBIT)
 
 ENV_FILE = find_dotenv()
 if ENV_FILE:
@@ -36,6 +32,8 @@ DOMAIN = env.get(constants.DOMAIN)
 CLIENT_SECRET = env.get(constants.CLIENT_SECRET)
 CLIENT_ID = env.get(constants.CLIENT_ID)
 AUDIENCE = env.get(constants.AUDIENCE)
+EVE_URL = env.get(constants.EVE_URL)
+EVE_FETCHER = SmartFetch(EVE_URL)
 
 
 def get_token() -> None:
@@ -51,13 +49,8 @@ def get_token() -> None:
         'client_secret': CLIENT_SECRET,
         'audience': AUDIENCE
     }
-    res = requests.post("https://cidc-test.auth0.com/oauth/token", json=payload)
-
-    if not res.status_code == 200:
-        print("There was a problem getting a token")
-        print(res.reason)
-        if res.json:
-            print(res.json)
+    fetcher = SmartFetch('https://cidc-test.auth0.com/oauth/token')
+    res = fetcher.post(json=payload, code=200)
 
     return {
         'access_token': res.json()['access_token'],
@@ -125,7 +118,7 @@ def get_collabs(trial_id: str, token: str) -> dict:
     trial = {'_id': trial_id}
     projection = {'collaborators': 1}
     query = 'trials?where=%s&projection=%s' % (json.dumps(trial), json.dumps(projection))
-    return request_eve_endpoint(token, None, query, 'GET')
+    return EVE_FETCHER.get(token=token, endpoint=query)
 
 
 def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) -> None:
@@ -189,16 +182,8 @@ def move_files_from_staging(upload_record, google_path):
         manage_bucket_acl('lloyd-test-pipeline', record['gs_uri'], emails)
 
     # when move is completed, insert data objects
-    response = request_eve_endpoint(move_files_from_staging.token['access_token'], files, 'data')
-
-    if not response.status_code == 201:
-        print("Error creating data entries, exiting")
-        print(response.reason)
-        try:
-            print(response.json())
-        except JSONDecodeError:
-            print('no valid JSON in response')
-        return
+    EVE_FETCHER.post(
+        token=move_files_from_staging.token['access_token'], json=files, endpoint='data', code=201)
 
 
 @APP.task

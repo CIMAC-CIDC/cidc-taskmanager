@@ -1,12 +1,9 @@
 [[source]]
-
 url = "https://pypi.python.org/simple"
 verify_ssl = true
 name = "pypi"
 
-
 [packages]
-
 celery = "*"
 sphinx = "*"
 python-logstash = "*"
@@ -16,12 +13,10 @@ requests = "*"
 python-dotenv = "*"
 google-cloud-storage = "*"
 simplejson = "*"
-
+cidc_utils = {git = "https://github.com/dfci/cidc-utils.git"}
 
 [dev-packages]
-
-
+"pep8" = "*"
 
 [requires]
-
 python_version = "3.6"
