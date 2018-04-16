@@ -30,12 +30,26 @@ ENV_FILE = find_dotenv()
 if ENV_FILE:
     load_dotenv(ENV_FILE)
 
+EVE_URL = None
+CROMWELL_URL = None
+
+if not env.get('IS_CLOUD'):
+    EVE_URL = 'http://localhost:5000'
+    CROMWELL_URL = 'http://localhost:8000'
+else:
+    EVE_URL = (
+        'http://' +
+        env.get('INGESTION_API_SERVICE_HOST') + ':' + env.get('INGESTION_API_SERVICE_PORT')
+    )
+    CROMWELL_URL = (
+        'http://' +
+        env.get('CROMWELL_SERVER_SERVICE_HOST') + ':' + env.get('CROMWELL_SERVER_SERVICE_PORT')
+    )
+
 DOMAIN = env.get(constants.DOMAIN)
 CLIENT_SECRET = env.get(constants.CLIENT_SECRET)
 CLIENT_ID = env.get(constants.CLIENT_ID)
 AUDIENCE = env.get(constants.AUDIENCE)
-EVE_URL = env.get(constants.EVE_URL)
-CROMWELL_URL = env.get(constants.CROMWELL_URL)
 EVE_FETCHER = SmartFetch(EVE_URL)
 CROMWELL_FETCHER = SmartFetch(CROMWELL_URL)
 
@@ -102,7 +116,7 @@ def create_analysis_entry(
 
     # Insert the analysis object
     patch_res = requests.patch(
-        "http://ingestion-api:5000/analysis/" + record['analysis_id'],
+        EVE_URL + "/analysis/" + record['analysis_id'],
         json=payload_object,
         headers={
             "If-Match": _etag,
@@ -253,16 +267,13 @@ def analysis_pipeline():
         filter_runs = []
 
         for run in active_runs:
-            print(run)
             run_id = run['api_response']['id']
             record = run['record']
 
             # Poll status.
             endpoint = run_id + '/' + 'status'
             response = CROMWELL_FETCHER.get(
-                endpoint=endpoint, method='GET', code=200).json()['status']
-
-            print(response)
+                endpoint=endpoint, code=200).json()['status']
 
             # If run has finished, make a record.
             if response not in ['Submitted', 'Running']:

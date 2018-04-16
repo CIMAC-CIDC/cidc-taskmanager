@@ -28,11 +28,21 @@ ENV_FILE = find_dotenv()
 if ENV_FILE:
     load_dotenv(ENV_FILE)
 
+EVE_URL = None
+CROMWELL_URL = None
+
+if not env.get('IS_CLOUD'):
+    EVE_URL = 'http://localhost:5000'
+else:
+    EVE_URL = (
+        'http://' +
+        env.get('INGESTION_API_SERVICE_HOST') + ':' + env.get('INGESTION_API_SERVICE_PORT')
+    )
+
 DOMAIN = env.get(constants.DOMAIN)
 CLIENT_SECRET = env.get(constants.CLIENT_SECRET)
 CLIENT_ID = env.get(constants.CLIENT_ID)
 AUDIENCE = env.get(constants.AUDIENCE)
-EVE_URL = env.get(constants.EVE_URL)
 EVE_FETCHER = SmartFetch(EVE_URL)
 
 
@@ -126,9 +136,9 @@ def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) 
     Manages bucket authorization for users.
 
     Arguments:
-        bucket_name {str} -- [description]
-        gs_path {str} -- [description]
-        collaborators {[str]} -- [description]
+        bucket_name {str} -- Name of the google bucket.
+        gs_path {str} -- Path to object.
+        collaborators {[str]} -- List of email addresses.
     """
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
