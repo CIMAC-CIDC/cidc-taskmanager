@@ -4,94 +4,20 @@ Simple celery example
 """
 
 import subprocess
-import time
 import json
-import logging
 import datetime
-from os import environ as env
 from typing import List
 from uuid import uuid4
 
-
 from google.cloud import storage
-from dotenv import load_dotenv, find_dotenv
-from celery import Task
 from cidc_utils.requests import SmartFetch
 
+from AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
-import constants
+from variables import EVE_URL, LOGGER
 
-LOGGER = logging.getLogger('taskmanager')
-LOGGER.setLevel(logging.DEBUG)
 
-ENV_FILE = find_dotenv()
-if ENV_FILE:
-    load_dotenv(ENV_FILE)
-
-EVE_URL = None
-CROMWELL_URL = None
-
-if not env.get('IS_CLOUD'):
-    EVE_URL = 'http://localhost:5000'
-else:
-    EVE_URL = (
-        'http://' +
-        env.get('INGESTION_API_SERVICE_HOST') + ':' + env.get('INGESTION_API_SERVICE_PORT')
-    )
-
-DOMAIN = env.get(constants.DOMAIN)
-CLIENT_SECRET = env.get(constants.CLIENT_SECRET)
-CLIENT_ID = env.get(constants.CLIENT_ID)
-AUDIENCE = env.get(constants.AUDIENCE)
 EVE_FETCHER = SmartFetch(EVE_URL)
-
-
-def get_token() -> None:
-    """
-    Fetches a token from the auth server.
-
-    Returns:
-        dict -- Server response.
-    """
-    payload = {
-        'grant_type': 'client_credentials',
-        'client_id': CLIENT_ID,
-        'client_secret': CLIENT_SECRET,
-        'audience': AUDIENCE
-    }
-    fetcher = SmartFetch('https://cidc-test.auth0.com/oauth/token')
-    res = fetcher.post(json=payload, code=200)
-
-    return {
-        'access_token': res.json()['access_token'],
-        'expires_in': res.json()['expires_in'],
-        'time_fetched': time.time()
-    }
-
-
-class AuthorizedTask(Task):
-    """
-    Subclass of the Task type, exists to allow sharing of access tokens
-    between workers.
-
-    Arguments:
-        Task {Task} -- Celery task class
-    """
-    _token = None
-
-    @property
-    def token(self):
-        """
-        Defines the google access token for the class.
-
-        Returns:
-            dict -- Access response dictionary with key, ttl, time.
-        """
-        if self._token is None:
-            self._token = get_token()
-        elif time.time() - self._token['time_fetched'] > self._token['expires_in']:
-            self._token = get_token()
-        return self._token
 
 
 def run_subprocess_with_logs(

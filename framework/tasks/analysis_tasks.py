@@ -6,50 +6,19 @@ Simple celery example
 import datetime
 import json
 from json import JSONDecodeError
-import logging
 import re
 import time
-from os import environ as env
 from typing import List, Tuple
-from dotenv import load_dotenv, find_dotenv
 from cidc_utils.requests import SmartFetch
 
 import requests
-# from framework.utilities.rabbit_handler import RabbitMQHandler
+
+from AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
-from framework.tasks.cromwell_tasks import AuthorizedTask, manage_bucket_acl, get_collabs
+from framework.tasks.cromwell_tasks import manage_bucket_acl, get_collabs
+from variables import EVE_URL, LOGGER, CROMWELL_URL
 
-import constants
 
-LOGGER = logging.getLogger('taskmanager')
-LOGGER.setLevel(logging.DEBUG)
-# RABBIT = RabbitMQHandler('amqp://rabbitmq')
-# LOGGER.addHandler(RABBIT)
-
-ENV_FILE = find_dotenv()
-if ENV_FILE:
-    load_dotenv(ENV_FILE)
-
-EVE_URL = None
-CROMWELL_URL = None
-
-if not env.get('IS_CLOUD'):
-    EVE_URL = 'http://localhost:5000'
-    CROMWELL_URL = 'http://localhost:8000'
-else:
-    EVE_URL = (
-        'http://' +
-        env.get('INGESTION_API_SERVICE_HOST') + ':' + env.get('INGESTION_API_SERVICE_PORT')
-    )
-    CROMWELL_URL = (
-        'http://' +
-        env.get('CROMWELL_SERVER_SERVICE_HOST') + ':' + env.get('CROMWELL_SERVER_SERVICE_PORT')
-    )
-
-DOMAIN = env.get(constants.DOMAIN)
-CLIENT_SECRET = env.get(constants.CLIENT_SECRET)
-CLIENT_ID = env.get(constants.CLIENT_ID)
-AUDIENCE = env.get(constants.AUDIENCE)
 EVE_FETCHER = SmartFetch(EVE_URL)
 CROMWELL_FETCHER = SmartFetch(CROMWELL_URL)
 
