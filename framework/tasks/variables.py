@@ -35,5 +35,6 @@ else:
     )
     CROMWELL_URL = (
         'http://' +
-        env.get('CROMWELL_SERVER_SERVICE_HOST') + ':' + env.get('CROMWELL_SERVER_SERVICE_PORT')
+        env.get('CROMWELL_SERVER_SERVICE_HOST') + ':' + env.get('CROMWELL_SERVER_SERVICE_PORT') +
+        '/api/workflows/v1'
     )

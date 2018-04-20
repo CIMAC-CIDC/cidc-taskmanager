@@ -10,14 +10,11 @@ import re
 import time
 from typing import List, Tuple
 from cidc_utils.requests import SmartFetch
-
 import requests
-
-from AuthorizedTask import AuthorizedTask
+from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
 from framework.tasks.cromwell_tasks import manage_bucket_acl, get_collabs
-from variables import EVE_URL, LOGGER, CROMWELL_URL
-
+from framework.tasks.variables import EVE_URL, LOGGER, CROMWELL_URL
 
 EVE_FETCHER = SmartFetch(EVE_URL)
 CROMWELL_FETCHER = SmartFetch(CROMWELL_URL)
@@ -167,13 +164,71 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
     return input_dictionary
 
 
-def start_cromwell_flows(assay_response, groups):
+def set_record_processed(records, condition):
     """
-    Registers a cromwell run, and sends it to the API.
+    Takes a list of records, then changes their
+    processed status to match the condition
 
     Arguments:
-        assay_response {[type]} -- [description]
-        groups {[type]} -- [description]
+        records {[type]} -- [description]
+        condition {[type]} -- [description]
+
+    Returns:
+        [type] -- [description]
+    """
+    patch_status = []
+    for record in records:
+        patch_res = requests.patch(
+            EVE_URL + "/data/" + record['_id'],
+            json={
+                'processed': condition
+            },
+            headers={
+                "If-Match": record['_etag'],
+                "Authorization": 'Bearer {}'.format(
+                    analysis_pipeline.token['access_token']
+                )
+            }
+        )
+        patch_status.append(patch_res.status_code == 200)
+
+    return all(patch_status)
+
+
+def check_processed(records: List[dict]) -> Tuple(List[dict], bool):
+    """
+    Takes a list of records and queries the database to see if they have been used yet.
+
+    Arguments:
+        records {[dict]} -- List of record objects.
+
+    Returns:
+        Tuple -- Returns record ids and whether they are all processed or not.
+    """
+    record_ids = [x['_id'] for x in records]
+    response = EVE_FETCHER.get(
+        token=analysis_pipeline.token['access_token'],
+        endpoint='data?where={"$in": %s}&projection=%s' % (
+            record_ids, {'processed': 1}
+        )
+    ).json()['_items']
+    all_free = all(x['processed'] is False for x in response)
+    return record_ids, all_free
+
+
+def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):
+    """
+    Checks through all of the available data, and if appropriate,
+    begins pipeline runs on cromwell.
+
+    Arguments:
+        assay_response {[dict]} -- Response from assay endpoint.
+        groups {[dict]} -- Result of aggregator query, has records grouped
+        by sample ID along with assay/trial.
+
+    Returns:
+        response_arr: {[dict]} -- All of the responses from the cromwell API,
+        so that the runs can be tracked for completion.
     """
     # For each registered trial/assay, check if there is data that can be run.
     response_arr = []
@@ -186,12 +241,28 @@ def start_cromwell_flows(assay_response, groups):
                 trial_id = sample_assay['_id']['trial']
                 sample_id = sample_assay['_id']['sample_id']
 
-                # Figure out why trial id is an array.
                 payload = {
                     'trial': str(trial_id),
                     'assay': str(assay_id),
                     'samples': [str(sample_id)]
                 }
+
+                # Query all records to make sure not processed
+                records = sample_assay['records']
+                record_ids, all_free = check_processed(records)
+
+                if not all_free:
+                    print('Record involved in run has already been used')
+                    set_record_processed(record_ids, False)
+                    return []
+
+                # Patch all to ensure atomicity
+                status = set_record_processed(record_ids, True)
+
+                if not status:
+                    print("Patch operation failed! Aborting!")
+                    set_record_processed(record_ids, False)
+                    return []
 
                 # Create analysis entry.
                 res_json = EVE_FETCHER.post(
@@ -209,6 +280,7 @@ def start_cromwell_flows(assay_response, groups):
                         create_input_json(sample_assay, assay)
                     ).encode('utf-8')
                 }
+
                 response_arr.append({
                     'api_response': CROMWELL_FETCHER.post(code=201, files=files).json(),
                     'analysis_etag': res_json['_etag'],

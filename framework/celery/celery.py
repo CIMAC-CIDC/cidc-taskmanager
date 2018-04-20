@@ -7,9 +7,11 @@ from celery import Celery
 APP = Celery(
     'taskmanager',
     include=[
-        'framework.tasks.cromwell_tasks', 'framework.tasks.analysis_tasks'
-        ]
-    )
+        'framework.tasks.cromwell_tasks',
+        'framework.tasks.analysis_tasks',
+        'framework.tasks.processing_tasks'
+    ]
+)
 
 APP.config_from_object("celeryconfig")
 

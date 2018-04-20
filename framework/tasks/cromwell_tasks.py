@@ -12,9 +12,9 @@ from uuid import uuid4
 from google.cloud import storage
 from cidc_utils.requests import SmartFetch
 
-from AuthorizedTask import AuthorizedTask
+from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
-from variables import EVE_URL, LOGGER
+from framework.tasks.variables import EVE_URL, LOGGER
 
 
 EVE_FETCHER = SmartFetch(EVE_URL)
