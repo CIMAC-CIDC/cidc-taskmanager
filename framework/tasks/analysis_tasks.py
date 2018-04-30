@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.7
 """
 Simple celery example
 """
@@ -64,8 +64,8 @@ def create_analysis_entry(
     pattern = re.compile(r'gs://')
 
     for key, value in metadata['outputs'].items():
-        manage_bucket_acl('lloyd-test-pipeline', value, emails)
         if re.search(pattern, str(value)):
+            manage_bucket_acl('lloyd-test-pipeline', value, emails)
             filegen.append({
                 'file_name': key,
                 'gs_uri': value
@@ -127,7 +127,6 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
     sought_mappings = [
         item for sublist in [x['non_static_inputs'] for x in assay_response] for item in sublist
     ]
-
     # Query the data and organize it into groupings
     # The data are grouped into unique groups via trial/assay/sample_id
     aggregate_query = {'$inputs': sought_mappings}
@@ -195,7 +194,7 @@ def set_record_processed(records, condition):
     return all(patch_status)
 
 
-def check_processed(records: List[dict]) -> Tuple(List[dict], bool):
+def check_processed(records: List[dict]) -> Tuple[List[dict], bool]:
     """
     Takes a list of records and queries the database to see if they have been used yet.
 
@@ -206,14 +205,15 @@ def check_processed(records: List[dict]) -> Tuple(List[dict], bool):
         Tuple -- Returns record ids and whether they are all processed or not.
     """
     record_ids = [x['_id'] for x in records]
+    query_expr = {"_id": {"$in": record_ids}}
     response = EVE_FETCHER.get(
         token=analysis_pipeline.token['access_token'],
-        endpoint='data?where={"$in": %s}&projection=%s' % (
-            record_ids, {'processed': 1}
+        endpoint='data?where=%s' % (
+            json.dumps(query_expr)
         )
     ).json()['_items']
     all_free = all(x['processed'] is False for x in response)
-    return record_ids, all_free
+    return response, all_free
 
 
 def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):

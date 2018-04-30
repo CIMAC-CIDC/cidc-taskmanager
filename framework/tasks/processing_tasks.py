@@ -8,14 +8,14 @@ import subprocess
 from os import remove
 from typing import List
 from cidc_utils.requests import SmartFetch
-from AuthorizedTask import AuthorizedTask
+from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
-from variables import EVE_URL, LOGGER
+from framework.tasks.variables import EVE_URL, LOGGER
 
 
 def process_maf_file(
         maf_path: str, trial_id: str, assay_id: str, record_id: str
-) -> List(dict):
+):
     """
     Takes a maf file and processes it into a mongo record
 
@@ -40,19 +40,19 @@ def process_maf_file(
                 first_line = True
             elif first_line:
                 first_line = False
-                column_headers = line.split('\t')
+                column_headers = [header.strip() for header in line.split('\t')]
             else:
                 values = line.split('\t')
                 if not len(column_headers) == len(values):
                     LOGGER.error("Header and value length mismatch!")
                     raise IndexError
                 maf_entries.append(
-                    dict((column_headers[i], values[i]) for i, j in enumerate(values))
+                    dict((column_headers[i], values[i].strip()) for i, j in enumerate(values))
                 )
 
-    (entry.update(
-        {'trial': trial_id, 'assay': assay_id, 'data_id': record_id}
-    ) for entry in maf_entries)
+    [entry.update(
+        {'trial': trial_id, 'assay': assay_id, 'record_id': record_id}
+    ) for entry in maf_entries]
 
     return maf_entries
 
@@ -67,7 +67,6 @@ def parse_maf(records: List[dict]) -> None:
     Raises:
         IndexError -- [description]
     """
-
     for maf_record in records:
         LOGGER.debug('Beginning MAF file processing')
         logstring = 'Record, ' + maf_record['_id'] + 'recieved'
@@ -119,4 +118,5 @@ def parse_maf(records: List[dict]) -> None:
             LOGGER.debug('Upload Succesful')
         except RuntimeError as runt:
             msg = 'Upload failed: ' + runt
+            print(msg)
             LOGGER.error(msg)
