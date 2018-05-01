@@ -1,24 +1,18 @@
 [[source]]
-
 url = "https://pypi.python.org/simple"
 verify_ssl = true
 name = "pypi"
 
-
 [packages]
-
 celery = "*"
-sphinx = "*"
-python-logstash = "*"
-kombu = "*"
-nose = "*"
 requests = "*"
-
+google-cloud = "*"
+cidc_utils = {git = "https://github.com/dfci/cidc-utils"}
+python-dotenv = "*"
 
 [dev-packages]
-
-
+pylint = "*"
+"pep8" = "*"
 
 [requires]
-
 python_version = "3.6"

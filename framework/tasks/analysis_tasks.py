@@ -3,96 +3,42 @@
 Simple celery example
 """
 
-import json
-import logging
-import re
 import datetime
+import json
+from json import JSONDecodeError
+import re
+import time
+from typing import List, Tuple
+from cidc_utils.requests import SmartFetch
 import requests
-from pathlib import Path
-from framework.utilities.rabbit_handler import RabbitMQHandler
-from framework.utilities.eve_methods import request_eve_endpoint
+from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
-from framework.tasks.cromwell_tasks import run_subprocess_with_logs
+from framework.tasks.cromwell_tasks import manage_bucket_acl, get_collabs
+from framework.tasks.variables import EVE_URL, LOGGER, CROMWELL_URL
 
-
-LOGGER = logging.getLogger('taskmanager')
-LOGGER.setLevel(logging.DEBUG)
-# RABBIT = RabbitMQHandler('amqp://rabbitmq')
-# LOGGER.addHandler(RABBIT)
-
-
-def fetch_eve_or_fail(token, endpoint, data, code, method='POST'):
-    """
-    Method for fetching results from eve with a fail safe
-
-    Arguments:
-        token {string} -- access token
-        endpoint {string} -- endpoint data is being inserted into
-        data {dict} -- payload data to be uploaded
-        code {int} -- expected status code of the response
-
-    Keyword Arguments:
-        method {str} -- HTTP method (default: {'POST'})
-
-    Returns:
-        dict -- json formatted response from eve
-    """
-    response = request_eve_endpoint(token, data, endpoint, method)
-    if not response.status_code == code:
-        error_string = "There was a problem with your request: "
-        if (response.json):
-            error_string += json.dumps(response.json())
-        else:
-            error_string += response.reason
-        LOGGER.error(error_string)
-        raise RuntimeError(error_string)
-    return response.json()
-
-
-def fetch_pipelines_bucket():
-    """
-    Copies the cidc-pipelines bucket to local.
-    """
-    # gs://lloyd-test-pipeline/cidc-pipelines/wdl
-    copy_wdl_args = [
-        "gsutil",
-        "cp",
-        "-r",
-        "gs://lloyd-test-pipeline/cidc-pipelines/",
-        "."
-    ]
-    run_subprocess_with_logs(copy_wdl_args, "Copied pipelines folder")
-
-
-def dict_list_to_dict(list_of_dicts):
-    """
-    Helper method to turn a list of dicts into one dict
-
-    Arguments:
-        list_of_dicts {[dict]} -- list of dictionaries
-
-    Returns:
-        dict -- New dictionary made of the other dictionaries.
-    """
-    new_dictionary = {}
-    for dictionary in list_of_dicts:
-        for key, value in dictionary.items():
-            new_dictionary.setdefault(key, value)
-    return new_dictionary
+EVE_FETCHER = SmartFetch(EVE_URL)
+CROMWELL_FETCHER = SmartFetch(CROMWELL_URL)
 
 
 def create_analysis_entry(
-        assay,
-        trial,
-        username,
-        metadata_path,
-        status,
-        sample_id,
-        analysis_id,
-        _etag):
+        record: dict, run_id: str, status: bool, _etag: str, token: str, emails: List[str]
+) -> dict:
+    """
+    Updates the analysis entry with the information from the completed run.
+
+    Arguments:
+        record {dict} -- Contextual information about the run.
+        run_id {str} -- Id of the run on Cromwell Server
+        status {bool} -- Whether the run completed or aborted.
+        _etag {str} -- Etag value for patching.
+        token {str} -- Access token.
+        emails: {[str]} -- List of collaborators on the trial.
+
+    Returns:
+        dict -- response data from the API.
+    """
 
     stat = "Completed" if status else "Aborted"
-
     payload_object = {
         'files_generated': [],
         'status': {
@@ -101,192 +47,292 @@ def create_analysis_entry(
         }
     }
 
+    # If run failed, append logs to record.
+    if not status:
+        endpoint = run_id + '/' + 'logs'
+        log_data = CROMWELL_FETCHER.get(endpoint=endpoint).json()
+        payload_object['status']['message'] = json.dumps(log_data)
+
+    endpoint = run_id + '/' + 'metadata'
+    metadata = CROMWELL_FETCHER.get(endpoint=endpoint).json()
     filegen = payload_object['files_generated']
     data_to_upload = []
 
-    with open(metadata_path, "r") as metadata:
-        # Parse file string to JSON
-        string_meta = metadata.read()
-        payload_object['metadata_blob'] = string_meta
-        json_meta = json.loads(string_meta)
-        outputs = json_meta['outputs']
+    # Parse file string to JSON
+    string_meta = json.dumps(metadata)
+    payload_object['metadata_blob'] = string_meta
+    pattern = re.compile(r'gs://')
 
-        file_regex = r'gs://'
-        pattern = re.compile(file_regex)
+    for key, value in metadata['outputs'].items():
+        if re.search(pattern, str(value)):
+            manage_bucket_acl('lloyd-test-pipeline', value, emails)
+            filegen.append({
+                'file_name': key,
+                'gs_uri': value
+            })
+            data_to_upload.append({
+                'file_name': key,
+                'gs_uri': value,
+                'sample_id': record['sample_id'],
+                'trial': record['trial'],
+                'assay': record['assay'],
+                'analysis_id': record['analysis_id'],
+                'date_created': str(datetime.datetime.now().isoformat())
+            })
 
-        for key, value in outputs.items():
-            if re.search(pattern, str(value)):
-                filegen.append({
-                    'file_name': key,
-                    'gs_uri': value
-                })
-                data_to_upload.append({
-                    'file_name': key,
-                    'gs_uri': value,
-                    'sample_id': sample_id,
-                    'trial': trial,
-                    'assay': assay,
-                    'analysis_id': analysis_id,
-                    'date_created': str(datetime.datetime.now().isoformat())
-                })
     # Insert the analysis object
-
     patch_res = requests.patch(
-        "http://ingestion-api:5000/analysis/" + analysis_id,
+        EVE_URL + "/analysis/" + record['analysis_id'],
         json=payload_object,
         headers={
             "If-Match": _etag,
-            "Authorization": 'testing_token'
+            "Authorization": 'Bearer {}'.format(token)
         }
     )
 
-    if not patch_res.status_code == 200 and not patch_res.status_code == 201:
+    if not patch_res.status_code == 201:
         print("Error communicating with eve: " + patch_res.reason)
-        if (patch_res.json()):
-            print(patch_res.json())
+        if patch_res.json:
+            try:
+                print(patch_res.json())
+            except JSONDecodeError:
+                return None
 
     # Insert data
-    data_response = fetch_eve_or_fail('testing_token', 'data', data_to_upload, 201)
-
-    return data_response
+    return EVE_FETCHER.post(token=token, endpoint='data', json=data_to_upload, code=201)
 
 
-@APP.task
-def run_pipeline(trial, assay, samples=None):
-    """[summary]
-
-    Arguments:
-        trial {[type]} -- [description]
-        assay {[type]} -- [description]
-
-    Keyword Arguments:
-        samples {[type]} -- [description] (default: {None})
+def check_for_runs() -> Tuple[requests.Response, requests.Response]:
     """
-    # Hard coded way of doing 
-    method_dictionary = {
-        'PUT BWA ID HERE': run_bwa_pipeline
+    Queries data collection and compares with assay requirements.
+    If any runs are ready, sends out appropriate data.
+
+    Returns:
+        requests.Response -- Response containing data.
+    """
+    assay_projection = {
+        'non_static_inputs': 1,
+        'static_inputs': 1,
+        'wdl_location': 1
     }
 
-    if trial not in method_dictionary:
-        print("Pipeline not found!")
-        return
+    assay_query_string = "assays?projection=%s" % (json.dumps(assay_projection))
 
-    trial_to_run = method_dictionary[trial]
+    # Contains a list of all the running assays and their inputs
+    assay_response = EVE_FETCHER.get(
+        token=analysis_pipeline.token['access_token'], endpoint=assay_query_string, code=200
+    ).json()['_items']
 
-
-def run_alignment():
-    print('hi')
-
-
-@APP.task
-def run_bwa_pipeline(trial, assay, username, analysis_id, _etag, samples=None):
-    query_string = "assays/%s" % (assay)
-    data_response = request_eve_endpoint('testing_token', None, query_string, 'GET')
-
-    if not data_response.status_code == 200:
-        print(data_response.reason)
-        LOGGER.error(data_response.reason)
-        return
-
-    data_json = data_response.json()
-    wdl_path = data_json['wdl_location']
-    static_inputs = data_json['static_inputs']
-
-    # Query the data and organize it into pairs
-    aggregate_query = {"$trial": trial, "$assay": assay}
+    # Creates a list of all sought mappings.
+    sought_mappings = [
+        item for sublist in [x['non_static_inputs'] for x in assay_response] for item in sublist
+    ]
+    # Query the data and organize it into groupings
+    # The data are grouped into unique groups via trial/assay/sample_id
+    aggregate_query = {'$inputs': sought_mappings}
     query_string = "data/query?aggregate=%s" % (json.dumps(aggregate_query))
-    record_response = request_eve_endpoint('testing_token', None, query_string, 'GET')
+    record_response = EVE_FETCHER.get(
+        token=analysis_pipeline.token['access_token'], endpoint=query_string)
 
     if not record_response.status_code == 200:
         print(record_response.reason)
-        return
+        raise RuntimeError('Failed to fetch records')
 
-    record_json = record_response.json()
-    groups = record_json['_items']
+    return record_response, assay_response
 
-    # Make run directory
-    mkdir_args = [
-        "mkdir",
-        "cromwell_run"
-    ]
-    run_subprocess_with_logs(mkdir_args, "Making run directory: ")
 
-    # Copy google cloud config
-    LOGGER.debug('Beginning copy of cloud config file')
-    fetch_cloud_config_args = [
-        "gsutil",
-        "cp",
-        "gs://lloyd-test-pipeline/config/google_cloud.conf",
-        "."
-    ]
-    run_subprocess_with_logs(fetch_cloud_config_args, 'Google config copied: ')
+def create_input_json(sample_assay: dict, assay: dict) -> dict:
+    """
+    Constructs the input.json file to run the pipeline.
 
-    LOGGER.debug('About to fetch pipelines bucket')
-    fetch_pipelines_bucket()
-    LOGGER.debug('Pipeline bucket fetched')
+    Arguments:
+        sample_assay {dict} -- Record representing a group of files with the same sampleID
+        assay {dict} -- Record entry for the assay being run.
 
-    for sample_id in groups:
-        if not len(sample_id['records']) == 2:
-            print('Error for sample: ' + sample_id['_id'] + ' not a valid pair of files')
-        else:
-            # Add input variables
-            new_dictionary = {}
+    Returns:
+        dict -- Inputs.JSON
+    """
+    input_dictionary = {}
+    # Map inputs to make inputs.json file
+    for entry in assay['static_inputs']:
+        input_dictionary[entry['key_name']] = entry['key_value']
 
-            # Merges the list of dictionaries into one dictionary.
-            for entry in static_inputs:
-                new_dictionary[entry['key_name']] = entry['key_value']
+    for record in sample_assay['records']:
+        input_dictionary[record['mapping']] = record['gs_uri']
 
-            # Determine Which File is which based on ending
-            pattern1 = re.compile('_1\\.')
-            pattern2 = re.compile('_2\\.')
+    return input_dictionary
 
-            for record in sample_id['records']:
-                if pattern1.search(record['file_name']):
-                    new_dictionary['run_bwamem.bwamem.fastq1'] = record['gs_uri']
-                elif pattern2.search(record['file_name']):
-                    new_dictionary['run_bwamem.bwamem.fastq2'] = record['gs_uri']
-                else:
-                    print("ERROR NAMING CONVENTIONS NOT FOLLOWED")
-                    raise RuntimeError("Pair naming error" + record['file_name'])
 
-            # Create input.json file
-            input_string = json.dumps(new_dictionary)
-            print(input_string)
-            with open("cromwell_run/inputs.json", "w") as input_file:
-                input_file.write(input_string)
+def set_record_processed(records, condition):
+    """
+    Takes a list of records, then changes their
+    processed status to match the condition
 
-            # Construct cromwell arguments
-            cromwell_args = [
-                'java',
-                '-Dconfig.file=../google_cloud.conf',
-                '-jar',
-                '../cromwell-30.2.jar',
-                'run',
-                wdl_path,
-                '-i',
-                '../cromwell_run/inputs.json',
-                "-m",
-                "../cromwell_run/metadata"
-            ]
-            LOGGER.debug('Starting cromwell run')
+    Arguments:
+        records {[type]} -- [description]
+        condition {[type]} -- [description]
 
-            # Launch run
-            run_subprocess_with_logs(
-                cromwell_args, 'Cromwell run succeeded', 'utf-8', "cidc-pipelines"
-            )
+    Returns:
+        [type] -- [description]
+    """
+    patch_status = []
+    for record in records:
+        patch_res = requests.patch(
+            EVE_URL + "/data/" + record['_id'],
+            json={
+                'processed': condition
+            },
+            headers={
+                "If-Match": record['_etag'],
+                "Authorization": 'Bearer {}'.format(
+                    analysis_pipeline.token['access_token']
+                )
+            }
+        )
+        patch_status.append(patch_res.status_code == 200)
 
-            LOGGER.debug("Cromwell run finished")
+    return all(patch_status)
 
-            # Gather metadata
-            run_status = True if Path('./cromwell_run/metadata').is_file else False
 
-            create_analysis_entry(
-                assay,
-                trial,
-                str(username),
-                "./cromwell_run/metadata",
-                run_status,
-                sample_id['_id'],
-                analysis_id,
-                _etag
-            )
+def check_processed(records: List[dict]) -> Tuple[List[dict], bool]:
+    """
+    Takes a list of records and queries the database to see if they have been used yet.
+
+    Arguments:
+        records {[dict]} -- List of record objects.
+
+    Returns:
+        Tuple -- Returns record ids and whether they are all processed or not.
+    """
+    record_ids = [x['_id'] for x in records]
+    query_expr = {"_id": {"$in": record_ids}}
+    response = EVE_FETCHER.get(
+        token=analysis_pipeline.token['access_token'],
+        endpoint='data?where=%s' % (
+            json.dumps(query_expr)
+        )
+    ).json()['_items']
+    all_free = all(x['processed'] is False for x in response)
+    return response, all_free
+
+
+def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):
+    """
+    Checks through all of the available data, and if appropriate,
+    begins pipeline runs on cromwell.
+
+    Arguments:
+        assay_response {[dict]} -- Response from assay endpoint.
+        groups {[dict]} -- Result of aggregator query, has records grouped
+        by sample ID along with assay/trial.
+
+    Returns:
+        response_arr: {[dict]} -- All of the responses from the cromwell API,
+        so that the runs can be tracked for completion.
+    """
+    # For each registered trial/assay, check if there is data that can be run.
+    response_arr = []
+    for assay in assay_response:
+        for sample_assay in groups:
+            if sample_assay['_id']['assay'] == assay['_id'] \
+                    and len(sample_assay['records']) == len(assay['non_static_inputs']):
+
+                assay_id = assay['_id']
+                trial_id = sample_assay['_id']['trial']
+                sample_id = sample_assay['_id']['sample_id']
+
+                payload = {
+                    'trial': str(trial_id),
+                    'assay': str(assay_id),
+                    'samples': [str(sample_id)]
+                }
+
+                # Query all records to make sure not processed
+                records = sample_assay['records']
+                record_ids, all_free = check_processed(records)
+
+                if not all_free:
+                    print('Record involved in run has already been used')
+                    set_record_processed(record_ids, False)
+                    return []
+
+                # Patch all to ensure atomicity
+                status = set_record_processed(record_ids, True)
+
+                if not status:
+                    print("Patch operation failed! Aborting!")
+                    set_record_processed(record_ids, False)
+                    return []
+
+                # Create analysis entry.
+                res_json = EVE_FETCHER.post(
+                    token=analysis_pipeline.token['access_token'],
+                    endpoint='analysis',
+                    json=payload,
+                    code=201
+                ).json()
+                payload['analysis_id'] = res_json['_id']
+
+                # Create inputs.json file.
+                files = {
+                    'workflowSource': open(assay['wdl_location'], 'rb'),
+                    'workflowInputs': json.dumps(
+                        create_input_json(sample_assay, assay)
+                    ).encode('utf-8')
+                }
+
+                response_arr.append({
+                    'api_response': CROMWELL_FETCHER.post(code=201, files=files).json(),
+                    'analysis_etag': res_json['_etag'],
+                    'record': payload
+                })
+
+    return response_arr
+
+
+@APP.task(base=AuthorizedTask)
+def analysis_pipeline():
+    """
+    Start of a universal "check ready" scraper.
+    """
+    # Check if any runs are ready.
+    record_response, assay_response = check_for_runs()
+
+    # If they are, send them to cromwell to start.
+    active_runs = start_cromwell_flows(assay_response, record_response.json()['_items'])
+
+    # Poll for active runs until completed.
+    while active_runs:
+        time.sleep(5)
+        LOGGER.debug('polling')
+        filter_runs = []
+
+        for run in active_runs:
+            run_id = run['api_response']['id']
+            record = run['record']
+
+            # Poll status.
+            endpoint = run_id + '/' + 'status'
+            response = CROMWELL_FETCHER.get(
+                endpoint=endpoint, code=200).json()['status']
+
+            # If run has finished, make a record.
+            if response not in ['Submitted', 'Running']:
+
+                # Fetch collaborators to control access.
+                collabs = get_collabs(record['trial'], analysis_pipeline.token['access_token'])
+                emails = collabs.json()['_items'][0]['collaborators']
+
+                create_analysis_entry(
+                    record,
+                    run_id,
+                    response == 'Succeeded',
+                    run['analysis_etag'],
+                    analysis_pipeline.token['access_token'],
+                    emails
+                )
+                # Add run to filter list.
+                filter_runs.append(run)
+
+        # Filter finished runs out.
+        active_runs = [x for x in active_runs if x not in filter_runs]
