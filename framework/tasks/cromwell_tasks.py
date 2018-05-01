@@ -8,10 +8,8 @@ import json
 import datetime
 from typing import List
 from uuid import uuid4
-
 from google.cloud import storage
 from cidc_utils.requests import SmartFetch
-
 from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
 from framework.tasks.variables import EVE_URL, LOGGER

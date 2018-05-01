@@ -3,7 +3,6 @@ Sets some variables when the module is first run
 """
 import logging
 from os import environ as env
-
 from dotenv import load_dotenv, find_dotenv
 from cidc_utils.loghandler import RabbitMQHandler
 

@@ -5,17 +5,13 @@ name = "pypi"
 
 [packages]
 celery = "*"
-sphinx = "*"
-python-logstash = "*"
-kombu = "*"
-nose = "*"
 requests = "*"
+google-cloud = "*"
+cidc_utils = {git = "https://github.com/dfci/cidc-utils"}
 python-dotenv = "*"
-google-cloud-storage = "*"
-simplejson = "*"
-cidc_utils = {git = "https://github.com/dfci/cidc-utils.git"}
 
 [dev-packages]
+pylint = "*"
 "pep8" = "*"
 
 [requires]
