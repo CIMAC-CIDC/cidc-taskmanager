@@ -18,9 +18,6 @@ podTemplate(label: label, namespace: "jenkins", ttyEnabled: true, command: 'cat'
                 sh 'python --version'
                 sh 'pip3 install -r requirements.txt'
             }
-            stage('Test Image') {
-                sh 'nose2'
-            }
         }
         container('docker') {
             stage('Build image') {
