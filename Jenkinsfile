@@ -2,6 +2,7 @@ def label = "worker-${UUID.randomUUID().toString()}"
 
 podTemplate(label: label, namespace: "jenkins", ttyEnabled: true, command: 'cat',
     containers: [
+        containerTemplate(name: 'python', image: 'python3.6.5', command: 'cat', ttyEnabled: true),
         containerTemplate(name: 'docker', image: 'docker', ttyEnabled: true, command: 'cat')
     ], 
     volumes: [
@@ -9,18 +10,22 @@ podTemplate(label: label, namespace: "jenkins", ttyEnabled: true, command: 'cat'
     ]
 ) {
     node(label) {
-        container('docker') {
-            def app
-            stage('Clone Repo') {
-                checkout scm
-            }
-            stage('Build image') {
-                app = docker.build("undivideddocker/celery-taskmanager")
+        stage('Clone Repo') {
+            checkout scm
+        }
+        container('python') {
+            stage('Install requirements') {
+                sh 'python --version'
+                sh 'pip3 install -r requirements.txt'
             }
             stage('Test Image') {
-                app.inside {
-                    sh "nose2"
-                }
+                sh 'nose2'
+            }
+        }
+        container('docker') {
+            stage('Build image') {
+                sh 'docker build -t undivideddocker/celerytaskmanager .'
+
             }
         }
     }
