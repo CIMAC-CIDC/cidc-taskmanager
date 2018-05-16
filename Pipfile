@@ -15,7 +15,6 @@ grpcio = "==1.09"
 [dev-packages]
 pylint = "*"
 "pep8" = "*"
-"nose2" = "*"
 
 [requires]
 python_version = "3.6"
