@@ -1,8 +1,12 @@
 def label = "worker-${UUID.randomUUID().toString()}"
 
-podTemplate(label: label, namespace: "jenkins", ttyEnabled: true, command: 'cat', containers: [
-    containerTemplate(name: 'docker', image: 'docker', ttyEnabled: true, command: 'cat')
-], volumes: [hostPathVolume(hostPath: '/var/run/docker.sock', mountPath: '/var/run/docker.sock')])
+podTemplate(label: label, namespace: "jenkins", ttyEnabled: true, command: 'cat',
+    containers: [
+        containerTemplate(name: 'docker', image: 'docker', ttyEnabled: true, command: 'cat')
+    ], 
+    volumes: [
+        hostPathVolume(hostPath: '/var/run/docker.sock', mountPath: '/var/run/docker.sock')
+    ]
 ) {
     node(label) {
         container('docker') {
