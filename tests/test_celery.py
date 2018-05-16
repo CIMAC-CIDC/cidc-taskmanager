@@ -6,14 +6,6 @@ from framework.tasks.analysis_tasks import create_input_json
 from framework.tasks.cromwell_tasks import run_subprocess_with_logs
 
 
-def test_run_subprocess():
-    """
-    Tests the run_subprocess
-    """
-    run_subprocess_with_logs(["ls"], "")
-    assert True
-
-
 def test_create_input_json():
     """
     Tests function create_input_json
