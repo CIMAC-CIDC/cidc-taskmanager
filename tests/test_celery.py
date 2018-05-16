@@ -11,6 +11,7 @@ def test_run_subprocess():
     Tests the run_subprocess
     """
     run_subprocess_with_logs(["ls"], "")
+    assert True
 
 
 def test_create_input_json():
@@ -20,7 +21,8 @@ def test_create_input_json():
     sample_assay = {
         'records': [
             {
-                'mapping': 'gs://sample/gs/uri'
+                'gs_uri': 'gs://sample/gs/uri',
+                'mapping': ''
             }
         ]
     }
@@ -33,3 +35,4 @@ def test_create_input_json():
         ]
     }
     input_dictionary = create_input_json(sample_assay, assay)
+    assert input_dictionary
