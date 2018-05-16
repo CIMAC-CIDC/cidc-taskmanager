@@ -4,7 +4,6 @@ Task subclass that allows processes to share a token
 """
 import time
 import requests
-from cidc_utils.requests import SmartFetch
 from celery import Task
 from framework.tasks.variables import CLIENT_SECRET, CLIENT_ID, AUDIENCE
 
@@ -22,14 +21,7 @@ def get_token() -> None:
         'client_secret': CLIENT_SECRET,
         'audience': AUDIENCE
     }
-    print(payload)
-    print("this is the payload!!!")
     res = requests.post("https://cidc-test.auth0.com/oauth/token", json=payload)
-    # fetcher = SmartFetch('https://cidc-test.auth0.com/oauth/token')
-    # res = fetcher.post(json=payload, code=200)
-    print(res.status_code)
-    print(res.reason)
-    print(res.json())
     return {
         'access_token': res.json()['access_token'],
         'expires_in': res.json()['expires_in'],

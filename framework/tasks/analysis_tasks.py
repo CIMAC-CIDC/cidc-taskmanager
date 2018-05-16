@@ -2,7 +2,6 @@
 """
 Simple celery example
 """
-
 import datetime
 import json
 from json import JSONDecodeError
@@ -73,11 +72,12 @@ def create_analysis_entry(
             data_to_upload.append({
                 'file_name': key,
                 'gs_uri': value,
-                'sample_id': record['sample_id'],
+                'sample_id': record['samples'][0],
                 'trial': record['trial'],
                 'assay': record['assay'],
                 'analysis_id': record['analysis_id'],
-                'date_created': str(datetime.datetime.now().isoformat())
+                'date_created': str(datetime.datetime.now().isoformat()),
+                'mapping': ''
             })
 
     # Insert the analysis object
@@ -90,7 +90,7 @@ def create_analysis_entry(
         }
     )
 
-    if not patch_res.status_code == 201:
+    if not patch_res.status_code == 201 and not patch_res.status_code == 200:
         print("Error communicating with eve: " + patch_res.reason)
         if patch_res.json:
             try:

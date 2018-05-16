@@ -69,43 +69,36 @@ def parse_maf(records: List[dict]) -> None:
     """
     for maf_record in records:
         LOGGER.debug('Beginning MAF file processing')
-        logstring = 'Record, ' + maf_record['_id'] + 'recieved'
-        LOGGER.debug(logstring)
-
+        # logstring = 'Record, ' + maf_record['_id'] + 'recieved'
+        # LOGGER.debug(logstring)
         # Check If MAF
         maf_re = re.compile(r'.maf$')
         if not re.search(maf_re, maf_record['file_name']):
             return
-
         LOGGER.debug('Identified record as MAF file, converting to VCF')
-
         # Copy to local disk
         gs_args = [
             'gsutil',
             'cp',
             maf_record['gs_uri'],
-            '.'
+            'maf'
         ]
         subprocess.run(gs_args)
-
+        subprocess.run(['ls'])
         # Process
         maf_entries = process_maf_file(
-            maf_record['file_name'],
-            maf_record['trial_id'],
-            maf_record['assay_id'],
-            maf_record['_id']
+            'maf',
+            maf_record['trial']['$oid'],
+            maf_record['assay']['$oid'],
+            maf_record['_id']['$oid']
         )
-
         LOGGER.debug('Processing complete.')
-
         # Clean up
         try:
-            remove(maf_record['file_name'])
+            remove('maf')
         except OSError:
             pass
-
         eve_fetcher = SmartFetch(EVE_URL)
-
         LOGGER.debug('Uploading data.')
         # Insert data
         try:

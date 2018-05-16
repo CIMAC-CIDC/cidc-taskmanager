@@ -5,14 +5,16 @@ name = "pypi"
 
 [packages]
 celery = "*"
-requests = "*"
-google-cloud = "*"
-cidc_utils = {git = "https://github.com/dfci/cidc-utils"}
 python-dotenv = "*"
+requests = "*"
+cidc_utils = {git = "https://github.com/dfci/cidc-utils"}
+google-cloud = "*"
+grpcio = "==1.09"
 
 [dev-packages]
 pylint = "*"
 "pep8" = "*"
+"nose2" = "*"
 
 [requires]
 python_version = "3.6"

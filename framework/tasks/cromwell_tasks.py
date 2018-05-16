@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Simple celery example
+Celery tasks for handling some basic interaction with uploaded files.
 """
-
 import subprocess
 import json
 import datetime
