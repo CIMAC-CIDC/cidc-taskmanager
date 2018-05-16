@@ -10,14 +10,15 @@ podTemplate(label: label, namespace: "jenkins", ttyEnabled: true, command: 'cat'
     ]
 ) {
     node(label) {
-        stage('Clone Repo') {
-            checkout scm
-        }
-        container('python') {
-            stage('Install requirements') {
+        stage('Run unit tests') {
+            container('python') {
+                checkout scm
                 sh 'python --version'
+                sh 'ls'
                 sh 'pip3 install -r requirements.txt'
+                sh 'which nose2'
                 sh 'nose2'
+                sh 'echo "done"'
             }
         }
         container('docker') {
