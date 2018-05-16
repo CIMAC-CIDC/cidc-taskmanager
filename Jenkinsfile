@@ -13,12 +13,13 @@ podTemplate(label: label, namespace: "jenkins", ttyEnabled: true,
         stage('Run unit tests') {
             container('python') {
                 checkout scm
-                sh 'python --version'
-                sh 'ls'
-                sh 'pip3 install -r requirements.txt'
-                sh 'which nose2'
-                sh 'nose2 --verbose'
-                sh 'echo "done"'
+                sh '''
+                python --version
+                ls
+                pip3 install -r requirements.txt
+                which nose2
+                nose2 --verbose
+                '''
             }
         }
         container('docker') {
