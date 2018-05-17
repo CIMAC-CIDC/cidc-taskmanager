@@ -24,7 +24,7 @@ podTemplate(label: label, namespace: "jenkins", ttyEnabled: true, command: 'cat'
         }
         container('docker') {
             stage('Build image') {
-                sh 'docker build undivideddocker/celerytaskmanager'
+                sh 'docker build -t undivideddocker/celerytaskmanager .'
             }
         }
     }
