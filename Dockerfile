@@ -16,5 +16,5 @@ RUN apk add --no-cache python
 ENV PYTHONPATH "$PYTHONPATH:/usr/lib/python3"
 
 RUN pip3 install -r requirements.txt
-
+RUN nose2
 CMD sh run.sh

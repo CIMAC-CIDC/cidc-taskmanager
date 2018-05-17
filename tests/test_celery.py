@@ -2,7 +2,7 @@
 """
 Unit tests for the celery repo
 """
-from framework.tasks.analysis_tasks import create_input_json
+# from framework.tasks.analysis_tasks import create_input_json
 
 
 def test_nothing():
