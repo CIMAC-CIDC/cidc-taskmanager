@@ -8,7 +8,7 @@ from celery import Task
 from framework.tasks.variables import CLIENT_SECRET, CLIENT_ID, AUDIENCE
 
 
-def get_token() -> None:
+def get_token() -> dict:
     """
     Fetches a token from the auth server.
 

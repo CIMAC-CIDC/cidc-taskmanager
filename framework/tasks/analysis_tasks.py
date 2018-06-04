@@ -4,7 +4,6 @@ Simple celery example
 """
 import datetime
 import json
-from json import JSONDecodeError
 import re
 import time
 from typing import List, Tuple
@@ -17,6 +16,24 @@ from framework.tasks.variables import EVE_URL, LOGGER, CROMWELL_URL
 
 EVE_FETCHER = SmartFetch(EVE_URL)
 CROMWELL_FETCHER = SmartFetch(CROMWELL_URL)
+
+
+def get_run_log(run_id: str) -> dict:
+    """
+    Retrieves the logs for the given run ID.
+
+    Arguments:
+        run_id {str} -- Mongo ID of run.
+
+    Raises:
+        RuntimeError -- [description]
+
+    Returns:
+        dict -- Log data.
+    """
+    endpoint = run_id + '/' + 'logs'
+    log_data = CROMWELL_FETCHER.get(endpoint=endpoint).json()
+    return json.dumps(log_data)
 
 
 def create_analysis_entry(
@@ -36,32 +53,27 @@ def create_analysis_entry(
     Returns:
         dict -- response data from the API.
     """
-
-    stat = "Completed" if status else "Aborted"
     payload_object = {
         'files_generated': [],
         'status': {
-            'progress': stat,
+            'progress': "Completed" if status else "Aborted",
             'message': ''
         }
     }
 
     # If run failed, append logs to record.
     if not status:
-        endpoint = run_id + '/' + 'logs'
-        log_data = CROMWELL_FETCHER.get(endpoint=endpoint).json()
-        payload_object['status']['message'] = json.dumps(log_data)
+        payload_object['status']['message'] = get_run_log(run_id)
 
-    endpoint = run_id + '/' + 'metadata'
-    metadata = CROMWELL_FETCHER.get(endpoint=endpoint).json()
+    metadata = CROMWELL_FETCHER.get(endpoint=run_id + '/metadata').json()
     filegen = payload_object['files_generated']
     data_to_upload = []
 
     # Parse file string to JSON
     string_meta = json.dumps(metadata)
     payload_object['metadata_blob'] = string_meta
-    pattern = re.compile(r'gs://')
 
+    pattern = re.compile(r'gs://')
     for key, value in metadata['outputs'].items():
         if re.search(pattern, str(value)):
             manage_bucket_acl('lloyd-test-pipeline', value, emails)
@@ -77,7 +89,7 @@ def create_analysis_entry(
                 'assay': record['assay'],
                 'analysis_id': record['analysis_id'],
                 'date_created': str(datetime.datetime.now().isoformat()),
-                'mapping': ''
+                'mapping': key.split(".")[1]
             })
 
     # Insert the analysis object
@@ -90,13 +102,9 @@ def create_analysis_entry(
         }
     )
 
-    if not patch_res.status_code == 201 and not patch_res.status_code == 200:
+    if not patch_res.status_code == 200:
         print("Error communicating with eve: " + patch_res.reason)
-        if patch_res.json:
-            try:
-                print(patch_res.json())
-            except JSONDecodeError:
-                return None
+        raise RuntimeError
 
     # Insert data
     return EVE_FETCHER.post(token=token, endpoint='data', json=data_to_upload, code=201)
@@ -109,6 +117,31 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
 
     Returns:
         requests.Response -- Response containing data.
+        record_response: [{
+            _id: {
+                sample_id: "...",
+                assay: "...",
+                trial: "..."
+            },
+            records: [
+                {
+                    file_name: "...",
+                    gs_uri: "...",
+                    mapping: "...",
+                    _id: "..."
+                }
+            ]
+        }]
+        assay_response: [{
+            non_static_inputs: [
+                {
+                    key_name: "...",
+                    key_value: "..."
+                }
+            ],
+            static_inputs: ["...","..."],
+            wdl_location: "..."
+        }]
     """
     assay_projection = {
         'non_static_inputs': 1,
@@ -127,9 +160,20 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
     sought_mappings = [
         item for sublist in [x['non_static_inputs'] for x in assay_response] for item in sublist
     ]
+
+    # For stage 2 pipelines, look for the filenames.
+    input_names = [
+        item.split(".")[1] for sublist in [x['non_static_inputs'] for x in assay_response]
+        for item in sublist
+    ]
+
     # Query the data and organize it into groupings
     # The data are grouped into unique groups via trial/assay/sample_id
-    aggregate_query = {'$inputs': sought_mappings}
+    aggregate_query = {
+        '$inputs': sought_mappings,
+        '$input_names': input_names
+    }
+
     query_string = "data/query?aggregate=%s" % (json.dumps(aggregate_query))
     record_response = EVE_FETCHER.get(
         token=analysis_pipeline.token['access_token'], endpoint=query_string)
@@ -153,9 +197,15 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
         dict -- Inputs.JSON
     """
     input_dictionary = {}
+    # Get SampleID of run.
+    sample_id = sample_assay['_id']['sample_id']
     # Map inputs to make inputs.json file
     for entry in assay['static_inputs']:
-        input_dictionary[entry['key_name']] = entry['key_value']
+        # Set the prefix using the sample ID.
+        if re.search(r'.prefix$', entry["key_name"]):
+            input_dictionary[entry['key_name']] = sample_id
+        else:
+            input_dictionary[entry['key_name']] = entry['key_value']
 
     for record in sample_assay['records']:
         input_dictionary[record['mapping']] = record['gs_uri']

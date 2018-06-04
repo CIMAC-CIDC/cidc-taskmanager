@@ -69,8 +69,6 @@ def parse_maf(records: List[dict]) -> None:
     """
     for maf_record in records:
         LOGGER.debug('Beginning MAF file processing')
-        # logstring = 'Record, ' + maf_record['_id'] + 'recieved'
-        # LOGGER.debug(logstring)
         # Check If MAF
         maf_re = re.compile(r'.maf$')
         if not re.search(maf_re, maf_record['file_name']):
