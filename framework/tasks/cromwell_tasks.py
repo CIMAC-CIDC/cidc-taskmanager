@@ -76,6 +76,29 @@ def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) 
     blob.acl.save()
 
 
+def revoke_access(bucket_name: str, gs_path: str, emails: List[str]) -> None:
+    """
+    Revokes access to a given object for a list of people.
+
+    Arguments:
+        bucket_name {str} -- Name of the google bucket.
+        gs_path {str} -- Path to object.
+        emails {[str]} -- List of email addresses.
+    """
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    pathname = 'gs://' + bucket_name
+    blob_name = gs_path.replace(pathname, '')[1:]
+    blob = bucket.blob(blob_name)
+
+    blob.acl.reload()
+    for person in emails:
+        blob.acl.user(person).revoke_read()
+        blob.acl.user(person).revoke_write()
+
+    blob.acl.save()
+
+
 @APP.task(base=AuthorizedTask)
 def move_files_from_staging(upload_record, google_path):
     """Function that moves a file from staging to permanent storage

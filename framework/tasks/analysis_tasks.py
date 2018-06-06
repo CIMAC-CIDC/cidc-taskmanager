@@ -31,7 +31,7 @@ def get_run_log(run_id: str) -> dict:
     Returns:
         dict -- Log data.
     """
-    endpoint = run_id + '/' + 'logs'
+    endpoint = run_id + '/logs'
     log_data = CROMWELL_FETCHER.get(endpoint=endpoint).json()
     return json.dumps(log_data)
 
@@ -89,7 +89,7 @@ def create_analysis_entry(
                 'assay': record['assay'],
                 'analysis_id': record['analysis_id'],
                 'date_created': str(datetime.datetime.now().isoformat()),
-                'mapping': key.split(".")[1]
+                'mapping': key.split(".", 1)[1]
             })
 
     # Insert the analysis object
@@ -156,22 +156,24 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
         token=analysis_pipeline.token['access_token'], endpoint=assay_query_string, code=200
     ).json()['_items']
 
-    # Creates a list of all sought mappings.
+    # Creates a list of all sought mappings to find user-defined inputs
     sought_mappings = [
         item for sublist in [x['non_static_inputs'] for x in assay_response] for item in sublist
     ]
 
-    # For stage 2 pipelines, look for the filenames.
+    # For stage N > 2 pipelines, the inputs need to be computed from the trailing file names
+    # of the outputs, so the string must be parsed to cut off the run name unlike the
+    # user-uploaded files which can be matched against the whole name.
     input_names = [
-        item.split(".")[1] for sublist in [x['non_static_inputs'] for x in assay_response]
+        item.split(".", 1)[1] for sublist in [x['non_static_inputs'] for x in assay_response]
         for item in sublist
     ]
 
     # Query the data and organize it into groupings
+    # Add together the mapping and input names as a search
     # The data are grouped into unique groups via trial/assay/sample_id
     aggregate_query = {
-        '$inputs': sought_mappings,
-        '$input_names': input_names
+        '$inputs': sought_mappings + input_names,
     }
 
     query_string = "data/query?aggregate=%s" % (json.dumps(aggregate_query))
@@ -195,10 +197,26 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
 
     Returns:
         dict -- Inputs.JSON
+         record_response: [{
+            _id: {
+                sample_id: "...",
+                assay: "...",
+                trial: "..."
+            },
+            records: [
+                {
+                    file_name: "...",
+                    gs_uri: "...",
+                    mapping: "...",
+                    _id: "..."
+                }
+            ]
+        }]
     """
     input_dictionary = {}
     # Get SampleID of run.
     sample_id = sample_assay['_id']['sample_id']
+    print(sample_assay)
     # Map inputs to make inputs.json file
     for entry in assay['static_inputs']:
         # Set the prefix using the sample ID.
@@ -210,6 +228,7 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
     for record in sample_assay['records']:
         input_dictionary[record['mapping']] = record['gs_uri']
 
+    print(input_dictionary)
     return input_dictionary
 
 
@@ -283,8 +302,18 @@ def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):
     # For each registered trial/assay, check if there is data that can be run.
     response_arr = []
     for assay in assay_response:
+        # Get list of trials that include the assay.
+        query = {'assays.assay_id': assay['_id']}
+        trials = EVE_FETCHER.get(
+            endpoint="trials?where=%s" % (json.dumps(query)),
+            token=analysis_pipeline.token['access_token'],
+            code=200
+            ).json()['_items']
+        # Make array of IDs
+        trial_ids = [x['_id'] for x in trials]
+        # Make sure that the trial the data belongs to includes the assay about to be run.
         for sample_assay in groups:
-            if sample_assay['_id']['assay'] == assay['_id'] \
+            if sample_assay['_id']['trial'] in trial_ids \
                     and len(sample_assay['records']) == len(assay['non_static_inputs']):
 
                 assay_id = assay['_id']
