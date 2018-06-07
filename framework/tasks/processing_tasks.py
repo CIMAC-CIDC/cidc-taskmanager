@@ -5,9 +5,12 @@ Module for tasks that do post-run processing of output files.
 
 import re
 import subprocess
+import time
+from uuid import uuid4
 from os import remove
 from typing import List
 from cidc_utils.requests import SmartFetch
+from celery import group
 from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
 from framework.tasks.variables import EVE_URL, LOGGER
@@ -46,7 +49,7 @@ def process_hla_file(
                     "haplotypes": [],
                     "assay": assay_id,
                     "trial": trial_id,
-                    "record": record_id
+                    "record_id": record_id
                 }
                 for i in range(1, len(columns)):
                     haplotype = columns[i]
@@ -103,14 +106,21 @@ def process_table(
         for line in table:
             if line[0] != '#' and not first_line:
                 first_line = True
-                column_headers = [header.strip() for header in line.split('\t')]
+                column_headers = [
+                    header.strip().replace('"', '').replace('.', '') for header in line.split('\t')
+                ]
             elif first_line:
                 values = line.split('\t')
                 if not len(column_headers) == len(values):
                     LOGGER.error("Header and value length mismatch!")
                     raise IndexError
                 entries.append(
-                    dict((column_headers[i], values[i].strip()) for i, j in enumerate(values))
+                    dict(
+                        (
+                            column_headers[i],
+                            values[i].strip().replace('"', '')
+                        ) for i, j in enumerate(values)
+                    )
                 )
 
     [entry.update(
@@ -141,11 +151,86 @@ PROC = [
         're': r'.combined.all.binders.txt.annot.txt.clean.txt$',
         'func': process_table,
         'endpoint': 'neoantigen'
+    },
+    {
+        're': r'^Facets_output.',
+        'func': process_table,
+        'endpoint': 'purity'
+    },
+    {
+        're': r'^cluster.tsv$',
+        'func': process_table,
+        'endpoint': 'clonality_cluster'
+    },
+    {
+        're': r'^loci.tsv$',
+        'func': process_table,
+        'endpoint': 'loci'
+    },
+    {
+        're': r'^sample_confints_CP.',
+        'func': process_table,
+        'endpoint': 'confints_cp'
+    },
+    {
+        're': r'.pyclone.tsv$',
+        'func': process_table,
+        'endpoint': 'pyclone'
+    },
+    {
+        're': r'_segments',
+        'func': process_table,
+        'endpoint': 'cnv'
     }
 ]
 
 
 @APP.task(base=AuthorizedTask)
+def process_file(rec, pro, eve_fetcher):
+    """
+    Worker process that handles processing an individual file.
+
+    Arguments:
+        rec {dict} -- A record item to be processed.
+        pro {dict} -- The processing type to be done on the file.
+        eve_fetcher {SmartFetch} -- Eve connection instance.
+
+    Returns:
+        boolean -- Status of the operation.
+    """
+    gs_args = [
+        'gsutil',
+        'cp',
+        rec['gs_uri'],
+        'temp_file'
+    ]
+    subprocess.run(gs_args)
+    try:
+        # Use a random filename as tasks are executing in parallel.
+        temp_file_name = str(uuid4())
+        records = pro['func'](
+            'temp_file',
+            rec['trial']['$oid'],
+            rec['assay']['$oid'],
+            rec['_id']['$oid']
+        )
+        remove(temp_file_name)
+    except OSError:
+        pass
+    try:
+        eve_fetcher.post(
+            endpoint=rec['endpoint'],
+            token=process_file.token['access_token'],
+            code=201,
+            json=records
+        )
+        return True
+    except RuntimeError as runt:
+        print(runt)
+        return False
+
+
+@APP.task
 def postprocessing(records: List[dict]) -> None:
     """
     Scans incoming records and sees if they need post-processing.
@@ -158,35 +243,25 @@ def postprocessing(records: List[dict]) -> None:
         None -- [description]
     """
     eve_fetcher = SmartFetch(EVE_URL)
+    tasks = []
+
     for rec in records:
         print('Processing: ')
         print(rec['file_name'])
         for pro in PROC:
             regex = re.compile(pro['re'])
             if re.search(regex, rec['file_name']):
-                gs_args = [
-                    'gsutil',
-                    'cp',
-                    rec['gs_uri'],
-                    'temp_file'
-                ]
-                subprocess.run(gs_args)
-                records = pro['func'](
-                    'temp_file',
-                    rec['trial']['$oid'],
-                    rec['assay']['$oid'],
-                    rec['_id']['$oid']
+                # If a match is found, add to job queue
+                tasks.append(
+                    process_file.s(rec, pro, eve_fetcher)
                 )
-                try:
-                    remove('temp_file')
-                except OSError:
-                    pass
-                try:
-                    eve_fetcher.post(
-                        endpoint=rec['endpoint'],
-                        token=postprocessing.token['access_token'],
-                        code=201,
-                        json=records
-                    )
-                except RuntimeError as runt:
-                    print(runt)
+    job = group(tasks)
+
+    # Start all jobs in parallel
+    result = job.apply_async()
+    # Wait for jobs to finish.
+    while not result.ready():
+        time.sleep(10)
+
+    if not result.successful():
+        print('Error, some of the tasks failed')
