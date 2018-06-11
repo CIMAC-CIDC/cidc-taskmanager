@@ -107,7 +107,9 @@ def create_analysis_entry(
         raise RuntimeError
 
     # Insert data
-    return EVE_FETCHER.post(token=token, endpoint='data', json=data_to_upload, code=201)
+    if data_to_upload:
+        return EVE_FETCHER.post(token=token, endpoint='data', json=data_to_upload, code=201)
+    return None
 
 
 def check_for_runs() -> Tuple[requests.Response, requests.Response]:
