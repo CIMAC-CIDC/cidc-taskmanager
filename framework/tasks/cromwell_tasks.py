@@ -13,7 +13,6 @@ from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
 from framework.tasks.variables import EVE_URL, LOGGER
 
-
 EVE_FETCHER = SmartFetch(EVE_URL)
 
 
@@ -100,14 +99,14 @@ def revoke_access(bucket_name: str, gs_path: str, emails: List[str]) -> None:
 
 
 @APP.task(base=AuthorizedTask)
-def move_files_from_staging(upload_record, google_path):
+def move_files_from_staging(upload_record: dict, google_path: str) -> None:
     """Function that moves a file from staging to permanent storage
 
     Decorators:
         APP
 
     Arguments:
-        upload_record {[type]} -- [description]
+        upload_record {dict} -- Ingestion collection record listing files to be uploaded.
         google_path {str} -- Path to storage bucket.
     """
     staging_id = upload_record['_id']
@@ -139,19 +138,5 @@ def move_files_from_staging(upload_record, google_path):
 
     # when move is completed, insert data objects
     EVE_FETCHER.post(
-        token=move_files_from_staging.token['access_token'], json=files, endpoint='data', code=201)
-
-
-@APP.task
-def hello_world(message):
-    """
-    Simple function to test messaging
-
-    Decorators:
-        APP
-
-    Arguments:
-        message {[type]} -- [description]
-    """
-    print(message)
-    return message
+        token=move_files_from_staging.token['access_token'], json=files, endpoint='data', code=201
+    )

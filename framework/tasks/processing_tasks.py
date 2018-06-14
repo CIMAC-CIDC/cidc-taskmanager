@@ -58,6 +58,7 @@ def process_hla_file(
 
                     # Check for suffix.
                     if len(haplotype_fields) > 1:
+                        
                         # If suffix is found, store value, then trim.
                         if not str.isdigit(haplotype_fields[-1][-1]):
                             haplotype_record['suffix'] = haplotype_fields[-1][-1]
@@ -136,68 +137,130 @@ def process_table(
     return None
 
 
-PROC = [
-    {
+def process_rsem(
+        path: str, trial_id: str, assay_id: str, record_id: str
+) -> dict:
+    """
+    Processes an rsem type table.
+
+    Arguments:
+        path {str} -- Path to file.
+        trial_id {str} -- Trial ID that file belongs to.
+        assay_id {str} -- Assay ID that file belongs to.
+        record_id {str} -- Mongo ID of the parent file.
+        sample_id {str} -- Sample ID that run was performed on.
+
+    Raises:
+        IndexError -- [description]
+
+    Returns:
+        [dict] -- List of entries, where each row becomes a mongo record.
+    """
+    first_line = False
+    entries = []
+    with open(path, 'r', 8192) as table:
+        column_headers = []
+        for line in table:
+            if not first_line:
+                first_line = True
+                column_headers = [
+                    header.strip().replace('"', '').replace('.', '') for header in line.split('\t')
+                ]
+            elif first_line:
+                values = line.split('\t')
+                if not len(column_headers) == len(values):
+                    LOGGER.error("Header and value length mismatch!")
+                    raise IndexError
+                entries.append(
+                    dict(
+                        (
+                            column_headers[i],
+                            values[i].strip().replace('"', '').split(",")
+                            if column_headers[i] == 'transcript_id(s)'
+                            else values[i].strip().replace('"', '')
+                        ) for i, j in enumerate(values)
+                    )
+                )
+
+    [entry.update(
+        {
+            'trial': trial_id,
+            'assay': assay_id,
+            'record_id': record_id
+        }
+    ) for entry in entries]
+
+    if entries:
+        return entries
+    return None
+
+# This is an array of all the currently supported filetypes for storage in
+# MongoDB, with 're' indicating the regex to identify them from their
+# filename, 'func' being the function used to create the mongo object and
+# 'endpoint' indicating the API endpoint the records are posted to.
+
+PROC = {
+    'hla': {
         're': r'[._]hla[._]',
         'func': process_hla_file,
-        'endpoint': 'hla'
     },
-    {
+    'vcf': {
         're': r'.maf$',
         'func': process_table,
-        'endpoint': 'vcf'
     },
-    {
+    'neoantigen': {
         're': r'.combined.all.binders.txt.annot.txt.clean.txt$',
         'func': process_table,
-        'endpoint': 'neoantigen'
     },
-    {
+    'purity': {
         're': r'^Facets_output.',
         'func': process_table,
-        'endpoint': 'purity'
     },
-    {
+    'clonality_cluster': {
         're': r'^cluster.tsv$',
         'func': process_table,
-        'endpoint': 'clonality_cluster'
     },
-    {
+    'loci': {
         're': r'^loci.tsv$',
         'func': process_table,
-        'endpoint': 'loci'
     },
-    {
+    'confints_cp': {
         're': r'^sample_confints_CP.',
         'func': process_table,
-        'endpoint': 'confints_cp'
     },
-    {
+    'pyclone': {
         're': r'.pyclone.tsv$',
         'func': process_table,
-        'endpoint': 'pyclone'
     },
-    {
+    'cnv': {
         're': r'_segments',
         'func': process_table,
-        'endpoint': 'cnv'
+    },
+    'rsem_expression': {
+        're': r'_expression.genes$',
+        'func': process_rsem,
+    },
+    'rsem_isoforms': {
+        're': r'_expression.isoforms$',
+        'func': process_table,
     }
-]
+}
 
 
 @APP.task(base=AuthorizedTask)
-def process_file(rec, pro, eve_fetcher):
+def process_file(rec, pro):
     """
     Worker process that handles processing an individual file.
 
     Arguments:
         rec {dict} -- A record item to be processed.
-        pro {dict} -- The processing type to be done on the file.
-        eve_fetcher {SmartFetch} -- Eve connection instance.
+        pro {str} -- Key in the processing dictionary that the filetype
+        corresponds to.
 
     Returns:
         boolean -- Status of the operation.
     """
+    eve_fetcher = SmartFetch(EVE_URL)
     gs_args = [
         'gsutil',
         'cp',
@@ -205,10 +268,11 @@ def process_file(rec, pro, eve_fetcher):
         'temp_file'
     ]
     subprocess.run(gs_args)
+
     try:
         # Use a random filename as tasks are executing in parallel.
         temp_file_name = str(uuid4())
-        records = pro['func'](
+        records = PROC[pro]['func'](
             'temp_file',
             rec['trial']['$oid'],
             rec['assay']['$oid'],
@@ -217,16 +281,16 @@ def process_file(rec, pro, eve_fetcher):
         remove(temp_file_name)
     except OSError:
         pass
+
     try:
         eve_fetcher.post(
-            endpoint=rec['endpoint'],
+            endpoint=pro,
             token=process_file.token['access_token'],
             code=201,
             json=records
         )
         return True
-    except RuntimeError as runt:
-        print(runt)
+    except RuntimeError:
         return False
 
 
@@ -242,26 +306,41 @@ def postprocessing(records: List[dict]) -> None:
     Returns:
         None -- [description]
     """
-    eve_fetcher = SmartFetch(EVE_URL)
     tasks = []
 
     for rec in records:
         print('Processing: ')
         print(rec['file_name'])
         for pro in PROC:
-            regex = re.compile(pro['re'])
-            if re.search(regex, rec['file_name']):
+            if re.search(PROC[pro]['re'], rec['file_name']):
+                print('match found!')
                 # If a match is found, add to job queue
                 tasks.append(
-                    process_file.s(rec, pro, eve_fetcher)
+                    process_file.s(rec, pro)
                 )
-    job = group(tasks)
+            else:
+                print('no match')
+                print(re.search(PROC[pro]['re'], rec['file_name']))
+
+    job = None
+    # Grouping is slightly different depending on length of array.
+    if len(tasks) == 1:
+        job = group(tasks)
+    else:
+        job = group(*tasks)
 
     # Start all jobs in parallel
     result = job.apply_async()
+
+    for task in tasks:
+        print("Task: " + task + " is now starting")
+
     # Wait for jobs to finish.
-    while not result.ready():
+    cycles = 0
+    while not result.ready() and cycles < 70:
+        print('cycle')
         time.sleep(10)
+        cycles += 1
 
     if not result.successful():
         print('Error, some of the tasks failed')
