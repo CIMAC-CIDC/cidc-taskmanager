@@ -2,16 +2,17 @@
 """
 Celery tasks for handling some basic interaction with uploaded files.
 """
-import subprocess
-import json
 import datetime
+import subprocess
+import logging
+import json
 from typing import List
 from uuid import uuid4
 from google.cloud import storage
 from cidc_utils.requests import SmartFetch
 from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
-from framework.tasks.variables import EVE_URL, LOGGER
+from framework.tasks.variables import EVE_URL
 
 EVE_FETCHER = SmartFetch(EVE_URL)
 
@@ -29,11 +30,16 @@ def run_subprocess_with_logs(
         cwd {str} -- Current working directory.
     """
     try:
-        print(message)
+        logging.info({
+            'message': message,
+            'category': 'DEBUG'
+        })
         subprocess.run(cl_args, cwd=cwd)
     except subprocess.CalledProcessError as error:
-        error_string = 'Shell command generated error' + str(error.output)
-        LOGGER.error(error_string)
+        logging.error({
+            'message': 'Subprocess failed',
+            'category': 'ERROR-CELERY'
+        }, exc_info=True)
 
 
 def get_collabs(trial_id: str, token: str) -> dict:
@@ -70,6 +76,11 @@ def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) 
 
     blob.acl.reload()
     for person in collaborators:
+        log = "Gave read access to " + person + " for object: " + gs_path
+        logging.info({
+            'message': log,
+            'category': 'PERMISSIONS'
+        })
         blob.acl.user(person).grant_read()
 
     blob.acl.save()
@@ -92,6 +103,11 @@ def revoke_access(bucket_name: str, gs_path: str, emails: List[str]) -> None:
 
     blob.acl.reload()
     for person in emails:
+        log = "Revoked read/write access from " + person + " for object: " + gs_path
+        logging.info({
+            'message': log,
+            'category': 'PERMISSIONS'
+        })
         blob.acl.user(person).revoke_read()
         blob.acl.user(person).revoke_write()
 
@@ -130,7 +146,12 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
             record['gs_uri']
         ]
         run_subprocess_with_logs(gs_args, "Moving Files: ")
-
+        log = ("Moved record: " +
+               record['file_name'] + ' from ' + old_uri + 'to ' + record['gs_uri'])
+        logging.info({
+            'message': log,
+            'category': 'TRACK_RECORD'
+        })
         # Grant access to files in google storage.
         collabs = get_collabs(record['trial'], move_files_from_staging.token['access_token'])
         emails = collabs.json()['_items'][0]['collaborators']

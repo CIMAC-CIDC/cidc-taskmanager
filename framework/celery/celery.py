@@ -1,9 +1,17 @@
 #!/usr/bin/env python
 """Configures and runs a celery app
 """
-
+import logging
 from celery import Celery
+from cidc_utils.loghandler import StackdriverJsonFormatter
 
+
+LOGGER = logging.getLogger()
+LOGGER.setLevel('INFO')
+LOGHANDLER = logging.StreamHandler()
+FORMATTER = StackdriverJsonFormatter()
+LOGHANDLER.setFormatter(FORMATTER)
+LOGGER.addHandler(LOGHANDLER)
 APP = Celery(
     'taskmanager',
     include=[

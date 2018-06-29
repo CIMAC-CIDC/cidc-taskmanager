@@ -2,10 +2,10 @@
 """
 Module for tasks that do post-run processing of output files.
 """
-
 import re
 import subprocess
 import time
+import logging
 from uuid import uuid4
 from os import remove
 from typing import List
@@ -13,7 +13,7 @@ from cidc_utils.requests import SmartFetch
 from celery import group
 from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
-from framework.tasks.variables import EVE_URL, LOGGER
+from framework.tasks.variables import EVE_URL
 
 HAPLOTYPE_FIELD_NAMES = [
     'allele_group',
@@ -24,7 +24,7 @@ HAPLOTYPE_FIELD_NAMES = [
 
 
 def process_hla_file(
-    hla_path: str, trial_id: str, assay_id: str, record_id: str
+        hla_path: str, trial_id: str, assay_id: str, record_id: str
 ) -> dict:
     """
     Turns an .hla file into an array of HLA mongo entries.
@@ -58,7 +58,6 @@ def process_hla_file(
 
                     # Check for suffix.
                     if len(haplotype_fields) > 1:
-                        
                         # If suffix is found, store value, then trim.
                         if not str.isdigit(haplotype_fields[-1][-1]):
                             haplotype_record['suffix'] = haplotype_fields[-1][-1]
@@ -72,9 +71,15 @@ def process_hla_file(
 
                 hla_records.append(hla_record)
             except IndexError:
-                print("There was a problem with the format of the HLA file")
+                logging.error({
+                    'message': "There was a problem with the format of the HLA file",
+                    'category': 'ERROR-CELERY'
+                }, exc_info=True)
             except ValueError:
-                print("Attempted to convert a string to an int")
+                logging.error({
+                    'message': "Attempted to convert a string to an int",
+                    'category': 'ERROR-CELERY'
+                }, exc_info=True)
 
     if hla_records:
         return hla_records
@@ -113,7 +118,10 @@ def process_table(
             elif first_line:
                 values = line.split('\t')
                 if not len(column_headers) == len(values):
-                    LOGGER.error("Header and value length mismatch!")
+                    logging.error({
+                        'message': "Header and value length mismatch!",
+                        'category': 'ERROR-CELERY'
+                    })
                     raise IndexError
                 entries.append(
                     dict(
@@ -169,7 +177,10 @@ def process_rsem(
             elif first_line:
                 values = line.split('\t')
                 if not len(column_headers) == len(values):
-                    LOGGER.error("Header and value length mismatch!")
+                    logging.error({
+                        'message': "Header and value length mismatch!",
+                        'category': 'ERROR-CELERY'
+                    })
                     raise IndexError
                 entries.append(
                     dict(
@@ -194,10 +205,10 @@ def process_rsem(
         return entries
     return None
 
-# This is an array of all the currently supported filetypes for storage in
+# This is a dictionary of all the currently supported filetypes for storage in
 # MongoDB, with 're' indicating the regex to identify them from their
 # filename, 'func' being the function used to create the mongo object and
-# 'endpoint' indicating the API endpoint the records are posted to.
+# the key indicating the API endpoint the records are posted to.
 
 PROC = {
     'hla': {
@@ -248,7 +259,7 @@ PROC = {
 
 
 @APP.task(base=AuthorizedTask)
-def process_file(rec, pro):
+def process_file(rec: dict, pro: str) -> bool:
     """
     Worker process that handles processing an individual file.
 
@@ -261,12 +272,7 @@ def process_file(rec, pro):
         boolean -- Status of the operation.
     """
     eve_fetcher = SmartFetch(EVE_URL)
-    gs_args = [
-        'gsutil',
-        'cp',
-        rec['gs_uri'],
-        'temp_file'
-    ]
+    gs_args = ['gsutil', 'cp', rec['gs_uri'], 'temp_file']
     subprocess.run(gs_args)
 
     try:
@@ -291,6 +297,10 @@ def process_file(rec, pro):
         )
         return True
     except RuntimeError:
+        logging.error({
+            'message': 'Biomarker upload failed',
+            'category': 'ERROR-CELERY'
+        }, exc_info=True)
         return False
 
 
@@ -309,18 +319,22 @@ def postprocessing(records: List[dict]) -> None:
     tasks = []
 
     for rec in records:
-        print('Processing: ')
-        print(rec['file_name'])
+        message = 'Processing: ' + rec['file_name']
+        logging.info({
+            'message': message,
+            'category': 'DEBUG-CELERY'
+        })
         for pro in PROC:
             if re.search(PROC[pro]['re'], rec['file_name']):
-                print('match found!')
+                log = 'Match found for ' + rec['file_name']
+                logging.info({
+                    'message': log,
+                    'category': 'DEBUG-CELERY'
+                })
                 # If a match is found, add to job queue
                 tasks.append(
                     process_file.s(rec, pro)
                 )
-            else:
-                print('no match')
-                print(re.search(PROC[pro]['re'], rec['file_name']))
 
     job = None
     # Grouping is slightly different depending on length of array.
@@ -333,14 +347,20 @@ def postprocessing(records: List[dict]) -> None:
     result = job.apply_async()
 
     for task in tasks:
-        print("Task: " + task + " is now starting")
+        info = "Task: " + task + " is now starting"
+        logging.info({
+            'message': info,
+            'category': 'DEBUG-CELERY'
+        })
 
     # Wait for jobs to finish.
     cycles = 0
     while not result.ready() and cycles < 70:
-        print('cycle')
         time.sleep(10)
         cycles += 1
 
     if not result.successful():
-        print('Error, some of the tasks failed')
+        logging.error({
+            'message': 'Error, some of the tasks failed',
+            'category': 'ERROR-CELERY'
+        })
