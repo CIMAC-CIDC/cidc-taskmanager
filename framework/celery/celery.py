@@ -12,6 +12,9 @@ LOGHANDLER = logging.StreamHandler()
 FORMATTER = StackdriverJsonFormatter()
 LOGHANDLER.setFormatter(FORMATTER)
 LOGGER.addHandler(LOGHANDLER)
+LOGGER.info({
+    'message': 'Testing logging',
+    'category': 'INFO-CELERY'})
 APP = Celery(
     'taskmanager',
     include=[
