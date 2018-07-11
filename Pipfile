@@ -4,7 +4,8 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-celery = "*"
+kombu = "==4.1.0"
+celery = "==4.1.0"
 python-dotenv = "*"
 requests = "*"
 cidc_utils = {git = "https://github.com/dfci/cidc-utils"}
