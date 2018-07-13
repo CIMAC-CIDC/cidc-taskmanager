@@ -2,8 +2,8 @@
 """Configures and runs a celery app
 """
 import logging
-from celery import Celery
 from cidc_utils.loghandler import StackdriverJsonFormatter
+from celery import Celery
 
 
 LOGGER = logging.getLogger()

@@ -8,9 +8,9 @@ import logging
 import json
 from typing import List
 from uuid import uuid4
-from google.cloud import storage
 from cidc_utils.requests import SmartFetch
 from framework.tasks.AuthorizedTask import AuthorizedTask
+from framework.tasks.administrative_tasks import manage_bucket_acl
 from framework.celery.celery import APP
 from framework.tasks.variables import EVE_URL
 
@@ -35,7 +35,7 @@ def run_subprocess_with_logs(
             'category': 'DEBUG'
         })
         subprocess.run(cl_args, cwd=cwd)
-    except subprocess.CalledProcessError as error:
+    except subprocess.CalledProcessError:
         logging.error({
             'message': 'Subprocess failed',
             'category': 'ERROR-CELERY'
@@ -57,61 +57,6 @@ def get_collabs(trial_id: str, token: str) -> dict:
     projection = {'collaborators': 1}
     query = 'trials?where=%s&projection=%s' % (json.dumps(trial), json.dumps(projection))
     return EVE_FETCHER.get(token=token, endpoint=query)
-
-
-def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) -> None:
-    """
-    Manages bucket authorization for users.
-
-    Arguments:
-        bucket_name {str} -- Name of the google bucket.
-        gs_path {str} -- Path to object.
-        collaborators {[str]} -- List of email addresses.
-    """
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-    pathname = 'gs://' + bucket_name
-    blob_name = gs_path.replace(pathname, '')[1:]
-    blob = bucket.blob(blob_name)
-
-    blob.acl.reload()
-    for person in collaborators:
-        log = "Gave read access to " + person + " for object: " + gs_path
-        logging.info({
-            'message': log,
-            'category': 'PERMISSIONS'
-        })
-        blob.acl.user(person).grant_read()
-
-    blob.acl.save()
-
-
-def revoke_access(bucket_name: str, gs_path: str, emails: List[str]) -> None:
-    """
-    Revokes access to a given object for a list of people.
-
-    Arguments:
-        bucket_name {str} -- Name of the google bucket.
-        gs_path {str} -- Path to object.
-        emails {[str]} -- List of email addresses.
-    """
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-    pathname = 'gs://' + bucket_name
-    blob_name = gs_path.replace(pathname, '')[1:]
-    blob = bucket.blob(blob_name)
-
-    blob.acl.reload()
-    for person in emails:
-        log = "Revoked read/write access from " + person + " for object: " + gs_path
-        logging.info({
-            'message': log,
-            'category': 'PERMISSIONS'
-        })
-        blob.acl.user(person).revoke_read()
-        blob.acl.user(person).revoke_write()
-
-    blob.acl.save()
 
 
 @APP.task(base=AuthorizedTask)

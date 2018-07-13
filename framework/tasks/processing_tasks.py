@@ -73,12 +73,12 @@ def process_hla_file(
             except IndexError:
                 logging.error({
                     'message': "There was a problem with the format of the HLA file",
-                    'category': 'ERROR-CELERY'
+                    'category': 'ERROR-CELERY-PROCESSING'
                 }, exc_info=True)
             except ValueError:
                 logging.error({
                     'message': "Attempted to convert a string to an int",
-                    'category': 'ERROR-CELERY'
+                    'category': 'ERROR-CELERY-PROCESSING'
                 }, exc_info=True)
 
     if hla_records:
@@ -120,7 +120,7 @@ def process_table(
                 if not len(column_headers) == len(values):
                     logging.error({
                         'message': "Header and value length mismatch!",
-                        'category': 'ERROR-CELERY'
+                        'category': 'ERROR-CELERY-PROCESSING'
                     })
                     raise IndexError
                 entries.append(
@@ -179,7 +179,7 @@ def process_rsem(
                 if not len(column_headers) == len(values):
                     logging.error({
                         'message': "Header and value length mismatch!",
-                        'category': 'ERROR-CELERY'
+                        'category': 'ERROR-CELERY-PROCESSING'
                     })
                     raise IndexError
                 entries.append(
@@ -286,6 +286,7 @@ def process_file(rec: dict, pro: str) -> bool:
         )
         remove(temp_file_name)
     except OSError:
+        # If for some reason the file was deleted before this attempt to delete it, just pass.
         pass
 
     try:
@@ -295,11 +296,21 @@ def process_file(rec: dict, pro: str) -> bool:
             code=201,
             json=records
         )
+        for record in records:
+            log = (
+                "Record: " + record['file_name'] + " added to collection: " +
+                pro + ' on trial: ' + record['trial']['$oid'] + ' on assay ' +
+                record['assay']['$oid']
+            )
+            logging.info({
+                'message': log,
+                'category': 'FAIR-CELERY-RECORD'
+            })
         return True
     except RuntimeError:
         logging.error({
             'message': 'Biomarker upload failed',
-            'category': 'ERROR-CELERY'
+            'category': 'ERROR-CELERY-PROCESSING'
         }, exc_info=True)
         return False
 
@@ -322,14 +333,14 @@ def postprocessing(records: List[dict]) -> None:
         message = 'Processing: ' + rec['file_name']
         logging.info({
             'message': message,
-            'category': 'DEBUG-CELERY'
+            'category': 'FAIR-CELERY-PROCESSING'
         })
         for pro in PROC:
             if re.search(PROC[pro]['re'], rec['file_name']):
                 log = 'Match found for ' + rec['file_name']
                 logging.info({
                     'message': log,
-                    'category': 'DEBUG-CELERY'
+                    'category': 'DEBUG-CELERY-PROCESSING'
                 })
                 # If a match is found, add to job queue
                 tasks.append(
@@ -350,7 +361,7 @@ def postprocessing(records: List[dict]) -> None:
         info = "Task: " + task + " is now starting"
         logging.info({
             'message': info,
-            'category': 'DEBUG-CELERY'
+            'category': 'DEBUG-CELERY-PROCESSING'
         })
 
     # Wait for jobs to finish.
@@ -362,5 +373,5 @@ def postprocessing(records: List[dict]) -> None:
     if not result.successful():
         logging.error({
             'message': 'Error, some of the tasks failed',
-            'category': 'ERROR-CELERY'
+            'category': 'ERROR-CELERY-PROCESSING'
         })
