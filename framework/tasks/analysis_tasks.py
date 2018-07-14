@@ -6,13 +6,14 @@ import datetime
 import json
 import re
 import time
+import logging
 from typing import List, Tuple
 from cidc_utils.requests import SmartFetch
 import requests
 from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
 from framework.tasks.cromwell_tasks import manage_bucket_acl, get_collabs
-from framework.tasks.variables import EVE_URL, LOGGER, CROMWELL_URL
+from framework.tasks.variables import EVE_URL, CROMWELL_URL
 
 EVE_FETCHER = SmartFetch(EVE_URL)
 CROMWELL_FETCHER = SmartFetch(CROMWELL_URL)
@@ -34,6 +35,87 @@ def get_run_log(run_id: str) -> dict:
     endpoint = run_id + '/logs'
     log_data = CROMWELL_FETCHER.get(endpoint=endpoint).json()
     return json.dumps(log_data)
+
+
+def add_meta_item(
+        record: dict, key: str, value: object, emails: List[str]) -> Tuple[dict, dict]:
+    """Packages items from a cromwell output for addition to the Mongo database.
+
+    Arguments:
+        record {[type]} -- [description]
+        key {[type]} -- [description]
+        value {[type]} -- [description]
+        emails {[type]} -- [description]
+
+    Returns:
+        dict, dict -- Tuple of filegen entry and data upload entry.
+    """
+    manage_bucket_acl('lloyd-test-pipeline', value, emails)
+    return {
+        'file_name': key,
+        'gs_uri': value
+    }, {
+        'file_name': key,
+        'gs_uri': value,
+        'sample_id': record['samples'][0],
+        'trial': record['trial'],
+        'assay': record['assay'],
+        'analysis_id': record['analysis_id'],
+        'date_created': str(datetime.datetime.now().isoformat()),
+        'mapping': key.split(".", 1)[1]
+    }
+
+
+def meta_parse(
+        record: dict,
+        parent_key: str,
+        item: object,
+        data_to_upload: dict,
+        filegen: dict,
+        emails: List[str]
+) -> None:
+    """
+    Takes a metadata output JSON from a cromwell run, and returns a list of records
+    formatted for the database. Function has recursion to handle nested structures.
+    Also updates the access control lists of the objects affected.
+
+    Arguments:
+        record {dict} -- The output.json record.
+        parent_key {str} -- Key under which the entry is listed.
+        item {object} -- The output json value being processed.
+        data_to_upload {dict} -- Dictionary of data that needs to be uploaded.
+        filegen {dict} -- List of files being handled.
+        emails {[str]} -- List of emails of project collaborators.
+    """
+    if isinstance(item, str):
+        fil, dat = add_meta_item(
+            record,
+            parent_key,
+            item,
+            emails
+        )
+        filegen.append(fil)
+        data_to_upload.append(dat)
+    elif isinstance(item, list):
+        for sub_item in item:
+            meta_parse(
+                record,
+                parent_key,
+                sub_item,
+                data_to_upload,
+                filegen,
+                emails
+            )
+    elif isinstance(item, dict):
+        for key, value in item.items():
+            meta_parse(
+                record,
+                key,
+                value,
+                data_to_upload,
+                filegen,
+                emails
+            )
 
 
 def create_analysis_entry(
@@ -76,21 +158,14 @@ def create_analysis_entry(
     pattern = re.compile(r'gs://')
     for key, value in metadata['outputs'].items():
         if re.search(pattern, str(value)):
-            manage_bucket_acl('lloyd-test-pipeline', value, emails)
-            filegen.append({
-                'file_name': key,
-                'gs_uri': value
-            })
-            data_to_upload.append({
-                'file_name': key,
-                'gs_uri': value,
-                'sample_id': record['samples'][0],
-                'trial': record['trial'],
-                'assay': record['assay'],
-                'analysis_id': record['analysis_id'],
-                'date_created': str(datetime.datetime.now().isoformat()),
-                'mapping': key.split(".", 1)[1]
-            })
+            meta_parse(
+                record,
+                key,
+                value,
+                data_to_upload,
+                filegen,
+                emails
+            )
 
     # Insert the analysis object
     patch_res = requests.patch(
@@ -103,12 +178,18 @@ def create_analysis_entry(
     )
 
     if not patch_res.status_code == 200:
-        print("Error communicating with eve: " + patch_res.reason)
+        log = "Error communicating with eve: " + patch_res.reason
+        logging.error({
+            'message': log,
+            'category': 'ERROR-CELERY'
+        })
         raise RuntimeError
 
     # Insert data
-    return EVE_FETCHER.post(token=token, endpoint='data', json=data_to_upload, code=201)
-
+    if data_to_upload:
+        return EVE_FETCHER.post(token=token, endpoint='data', json=data_to_upload, code=201)
+    return None
+        
 
 def check_for_runs() -> Tuple[requests.Response, requests.Response]:
     """
@@ -214,11 +295,14 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
         }]
     """
     input_dictionary = {}
+
     # Get SampleID of run.
     sample_id = sample_assay['_id']['sample_id']
-    print(sample_assay)
+
+    run_prefix = assay['static_inputs'][0]['key_name'].split('.')[0]
     # Map inputs to make inputs.json file
     for entry in assay['static_inputs']:
+
         # Set the prefix using the sample ID.
         if re.search(r'.prefix$', entry["key_name"]):
             input_dictionary[entry['key_name']] = sample_id
@@ -226,23 +310,25 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
             input_dictionary[entry['key_name']] = entry['key_value']
 
     for record in sample_assay['records']:
-        input_dictionary[record['mapping']] = record['gs_uri']
-
+        if not re.search(run_prefix, record['mapping']):
+            input_dictionary[run_prefix + '.' + record['mapping']] = record['gs_uri']
+        else:
+            input_dictionary[record['mapping']] = record['gs_uri']
     print(input_dictionary)
     return input_dictionary
 
 
-def set_record_processed(records, condition):
+def set_record_processed(records: List[dict], condition: bool) -> bool:
     """
     Takes a list of records, then changes their
     processed status to match the condition
 
     Arguments:
-        records {[type]} -- [description]
-        condition {[type]} -- [description]
+        records {[dict]} -- List of "data" collection records.
+        condition {bool} -- True if processed else false.
 
     Returns:
-        [type] -- [description]
+        bool -- True if all records were succesfully patched, else false.
     """
     patch_status = []
     for record in records:
@@ -281,6 +367,8 @@ def check_processed(records: List[dict]) -> Tuple[List[dict], bool]:
             json.dumps(query_expr)
         )
     ).json()['_items']
+
+    # Check if all records are unprocessed.
     all_free = all(x['processed'] is False for x in response)
     return response, all_free
 
@@ -302,6 +390,7 @@ def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):
     # For each registered trial/assay, check if there is data that can be run.
     response_arr = []
     for assay in assay_response:
+
         # Get list of trials that include the assay.
         query = {'assays.assay_id': assay['_id']}
         trials = EVE_FETCHER.get(
@@ -309,8 +398,10 @@ def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):
             token=analysis_pipeline.token['access_token'],
             code=200
             ).json()['_items']
+
         # Make array of IDs
         trial_ids = [x['_id'] for x in trials]
+
         # Make sure that the trial the data belongs to includes the assay about to be run.
         for sample_assay in groups:
             if sample_assay['_id']['trial'] in trial_ids \
@@ -383,7 +474,11 @@ def analysis_pipeline():
     # Poll for active runs until completed.
     while active_runs:
         time.sleep(5)
-        LOGGER.debug('polling')
+        message = str(len(active_runs)) + ' runs still active...'
+        logging.info({
+            'message': message,
+            'category': 'DEBUG-CELERY'
+        })
         filter_runs = []
 
         for run in active_runs:

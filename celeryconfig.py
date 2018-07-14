@@ -10,7 +10,6 @@ broker_url = None
 if not env.get('IN_CLOUD'):
     broker_url = 'amqp://rabbitmq:5672'
 else:
-    print('not in the cloud')
     broker_url = (
         'amqp://' + env.get('RABBITMQ_SERVICE_HOST') + ':' + env.get('RABBITMQ_SERVICE_PORT'))
 
