@@ -9,8 +9,7 @@ celery = "==4.1.0"
 python-dotenv = "*"
 requests = "*"
 cidc_utils = {git = "https://github.com/dfci/cidc-utils"}
-google-cloud = "*"
-grpcio = "==1.09"
+google-cloud-storage = "*"
 "nose2" = "*"
 python-json-logger = "*"
 

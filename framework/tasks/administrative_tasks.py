@@ -5,6 +5,7 @@ These tasks are responsible for performing administrative and user management ta
 import json
 import logging
 import datetime
+from datetime import timedelta
 import subprocess
 from os import remove
 from typing import List
@@ -13,7 +14,7 @@ from cidc_utils.requests import SmartFetch
 from google.cloud import storage
 from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
-from framework.tasks.variables import EVE_URL, AUDIENCE
+from framework.tasks.variables import EVE_URL, MANAGEMENT_API
 
 EVE_FETCHER = SmartFetch(EVE_URL)
 
@@ -120,7 +121,7 @@ def check_last_login() -> None:
     """
     # Get list of accounts and their last logins.
     projection = {'last_access': 1, 'e-mail': 1}
-    query = 'accounts=%s' % (json.dumps(projection))
+    query = 'accounts?projection=%s' % (json.dumps(projection))
     user_results = EVE_FETCHER.get(
         token=check_last_login.token['access_token'], endpoint=query
         )['_items']
@@ -146,11 +147,14 @@ def fetch_last_log_id() -> str:
     Returns:
         str -- ID of the log.
     """
-    gs_args = ['gsutil', 'cp', 'gs://lloyd-test-pipeline/cidc-logstore/auth0/lastid.json', '']
+    gs_args = [
+        'gsutil', 'cp', 'gs://cidc-logstore/auth0/lastid.json', './lastid.json'
+        ]
     subprocess.run(gs_args)
+    subprocess.run(['ls'])
     log_json = None
     with open('lastid.json', 'r') as last_id:
-        log_json = json.loads(last_id)
+        log_json = json.load(last_id)
     remove('lastid.json')
     return log_json['_id']
 
@@ -178,13 +182,15 @@ def poll_auth0_logs() -> None:
     last_log_id = fetch_last_log_id()
 
     # Get new logs
-    logs_endpoint = AUDIENCE + 'logs?from=' + last_log_id + '&sort=date%3A1'
-    headers = {"Authorization": 'Bearer {}'.format(poll_auth0_logs.token['access_token'])}
+    logs_endpoint = MANAGEMENT_API + 'logs?from=' + last_log_id + '&sort=date%3A1'
+    headers = {"Authorization": 'Bearer {}'.format(poll_auth0_logs.api_token['access_token'])}
     results = requests.get(logs_endpoint, headers=headers)
-    gs_path = "gs://lloyd-test/cidc-logstore/auth0"
+    gs_path = "gs://cidc-logstore/auth0"
 
     if results.status_code != 200:
         print(results.reason)
+        print(results.status_code)
+        print(results.json())
     logs = results.json()
 
     # Update last log ID.

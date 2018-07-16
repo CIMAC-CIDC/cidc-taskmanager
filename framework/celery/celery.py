@@ -20,7 +20,8 @@ APP = Celery(
     include=[
         'framework.tasks.cromwell_tasks',
         'framework.tasks.analysis_tasks',
-        'framework.tasks.processing_tasks'
+        'framework.tasks.processing_tasks',
+        'framework.tasks.administrative_tasks'
     ]
 )
 

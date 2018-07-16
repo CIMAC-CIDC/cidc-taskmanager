@@ -12,10 +12,10 @@ DOMAIN = env.get('DOMAIN')
 CLIENT_SECRET = env.get('CLIENT_SECRET')
 CLIENT_ID = env.get('CLIENT_ID')
 AUDIENCE = env.get('AUDIENCE')
+MANAGEMENT_API = env.get('MANAGEMENT_API')
 
 EVE_URL = None
 CROMWELL_URL = None
-RABBIT = None
 
 if not env.get('IN_CLOUD'):
     EVE_URL = 'http://localhost:5000'
