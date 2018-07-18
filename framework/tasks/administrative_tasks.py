@@ -4,12 +4,12 @@ These tasks are responsible for performing administrative and user management ta
 """
 import json
 import logging
-import datetime
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 import subprocess
 from os import remove
 from typing import List
 import requests
+from dateutil.parser import parse
 from cidc_utils.requests import SmartFetch
 from google.cloud import storage
 from framework.tasks.AuthorizedTask import AuthorizedTask
@@ -33,7 +33,7 @@ def get_user_trials(user_email: str, token: str) -> List[dict]:
     collabs = {'collaborators': user_email}
     projection = {'_id': 1}
     query = 'trials?where=%s&projection=%s' % (json.dumps(collabs), json.dumps(projection))
-    return EVE_FETCHER.get(token=token, endpoint=query)['_items']
+    return EVE_FETCHER.get(token=token, endpoint=query).json()['_items']
 
 
 def get_user_records(matched_trials: List[dict], token: str) -> List[str]:
@@ -51,7 +51,7 @@ def get_user_records(matched_trials: List[dict], token: str) -> List[str]:
     condition = {'trial': {'$in': trial_ids}}
     proj = {'gs_uri': 1}
     data_query = 'data?where=%s&projection=%s' % (json.dumps(condition), json.dumps(proj))
-    records = EVE_FETCHER.get(token=token, endpoint=data_query)['_items']
+    records = EVE_FETCHER.get(token=token, endpoint=data_query).json()['_items']
     return [records['gs_uri'] for record in records]
 
 
@@ -88,8 +88,6 @@ def deactive_account(user_email: str, token: str) -> None:
     revoke_access('lloyd-test-pipeline', gs_uri_list, [user_email])
 
 
-# This may need to be changed to call an eve hook instead of directly deleting at the accounts
-# endpoint as that may not hash well with eve's security settings.
 def delete_user_account(user_email: str, token: str) -> None:
     """
     Delete a user account from the accounts collections.
@@ -101,7 +99,7 @@ def delete_user_account(user_email: str, token: str) -> None:
     cond = {'email': user_email}
     projection = {'_id': 1}
     query = 'accounts?where=%s&projection=%s' % (json.dumps(cond), json.dumps(projection))
-    user = EVE_FETCHER.get(endpoint=query, token=token)['_items'][0]
+    user = EVE_FETCHER.get(endpoint=query, token=token).json()['_items'][0]
     url = 'accounts/' + user['_id']
     headers = {
         'If-Match': user['_etag']
@@ -124,16 +122,16 @@ def check_last_login() -> None:
     query = 'accounts?projection=%s' % (json.dumps(projection))
     user_results = EVE_FETCHER.get(
         token=check_last_login.token['access_token'], endpoint=query
-        )['_items']
+        ).json()['_items']
 
     # Define relevant time periods and get current time.
     year = timedelta(days=365)
     month = timedelta(days=90)
-    current_t = datetime.datetime.now()
+    current_t = datetime.now(timezone.utc)
 
     # Deactive any accounts inactive for a month, delete any inactive for a year.
     for user in user_results:
-        last_l = datetime.datetime(user['last_login'])
+        last_l = parse(user['last_access'])
         if current_t - last_l > month:
             deactive_account(user, check_last_login.token['access_token'])
         elif current_t - last_l > year:

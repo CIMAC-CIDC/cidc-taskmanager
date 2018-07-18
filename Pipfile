@@ -12,6 +12,7 @@ cidc_utils = {git = "https://github.com/dfci/cidc-utils"}
 google-cloud-storage = "*"
 "nose2" = "*"
 python-json-logger = "*"
+python-dateutil = "*"
 
 [dev-packages]
 pylint = "*"

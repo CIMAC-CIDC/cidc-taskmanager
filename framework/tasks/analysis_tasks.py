@@ -61,7 +61,7 @@ def add_meta_item(
         'trial': record['trial'],
         'assay': record['assay'],
         'analysis_id': record['analysis_id'],
-        'date_created': str(datetime.datetime.now().isoformat()),
+        'date_created': str(datetime.datetime.utcnow().isoformat()),
         'mapping': key.split(".", 1)[1]
     }
 
