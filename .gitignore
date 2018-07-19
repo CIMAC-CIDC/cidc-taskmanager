@@ -3,3 +3,4 @@ __pycache__/
 cromwell-workflow-logs/
 .google_auth.json
 cromwell_run/*
+celerybeat-schedule

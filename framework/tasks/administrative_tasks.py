@@ -4,16 +4,23 @@ These tasks are responsible for performing administrative and user management ta
 """
 import json
 import logging
-import datetime
+from datetime import timedelta, datetime, timezone
 import subprocess
 from os import remove
 from typing import List
 import requests
+from dateutil.parser import parse
 from cidc_utils.requests import SmartFetch
 from google.cloud import storage
 from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
-from framework.tasks.variables import EVE_URL, AUDIENCE
+from framework.tasks.variables import (
+    EVE_URL,
+    MANAGEMENT_API,
+    AUTH0_DOMAIN,
+    LOGSTORE,
+    GOOGLE_BUCKET_NAME
+)
 
 EVE_FETCHER = SmartFetch(EVE_URL)
 
@@ -32,7 +39,7 @@ def get_user_trials(user_email: str, token: str) -> List[dict]:
     collabs = {'collaborators': user_email}
     projection = {'_id': 1}
     query = 'trials?where=%s&projection=%s' % (json.dumps(collabs), json.dumps(projection))
-    return EVE_FETCHER.get(token=token, endpoint=query)['_items']
+    return EVE_FETCHER.get(token=token, endpoint=query).json()['_items']
 
 
 def get_user_records(matched_trials: List[dict], token: str) -> List[str]:
@@ -50,7 +57,7 @@ def get_user_records(matched_trials: List[dict], token: str) -> List[str]:
     condition = {'trial': {'$in': trial_ids}}
     proj = {'gs_uri': 1}
     data_query = 'data?where=%s&projection=%s' % (json.dumps(condition), json.dumps(proj))
-    records = EVE_FETCHER.get(token=token, endpoint=data_query)['_items']
+    records = EVE_FETCHER.get(token=token, endpoint=data_query).json()['_items']
     return [records['gs_uri'] for record in records]
 
 
@@ -87,8 +94,6 @@ def deactive_account(user_email: str, token: str) -> None:
     revoke_access('lloyd-test-pipeline', gs_uri_list, [user_email])
 
 
-# This may need to be changed to call an eve hook instead of directly deleting at the accounts
-# endpoint as that may not hash well with eve's security settings.
 def delete_user_account(user_email: str, token: str) -> None:
     """
     Delete a user account from the accounts collections.
@@ -100,7 +105,7 @@ def delete_user_account(user_email: str, token: str) -> None:
     cond = {'email': user_email}
     projection = {'_id': 1}
     query = 'accounts?where=%s&projection=%s' % (json.dumps(cond), json.dumps(projection))
-    user = EVE_FETCHER.get(endpoint=query, token=token)['_items'][0]
+    user = EVE_FETCHER.get(endpoint=query, token=token).json()['_items'][0]
     url = 'accounts/' + user['_id']
     headers = {
         'If-Match': user['_etag']
@@ -120,19 +125,19 @@ def check_last_login() -> None:
     """
     # Get list of accounts and their last logins.
     projection = {'last_access': 1, 'e-mail': 1}
-    query = 'accounts=%s' % (json.dumps(projection))
+    query = 'accounts?projection=%s' % (json.dumps(projection))
     user_results = EVE_FETCHER.get(
         token=check_last_login.token['access_token'], endpoint=query
-        )['_items']
+        ).json()['_items']
 
     # Define relevant time periods and get current time.
     year = timedelta(days=365)
     month = timedelta(days=90)
-    current_t = datetime.datetime.now()
+    current_t = datetime.now(timezone.utc)
 
     # Deactive any accounts inactive for a month, delete any inactive for a year.
     for user in user_results:
-        last_l = datetime.datetime(user['last_login'])
+        last_l = parse(user['last_access'])
         if current_t - last_l > month:
             deactive_account(user, check_last_login.token['access_token'])
         elif current_t - last_l > year:
@@ -146,11 +151,14 @@ def fetch_last_log_id() -> str:
     Returns:
         str -- ID of the log.
     """
-    gs_args = ['gsutil', 'cp', 'gs://lloyd-test-pipeline/cidc-logstore/auth0/lastid.json', '']
+    gs_args = [
+        'gsutil', 'cp', 'gs://cidc-logstore/auth0/lastid.json', './lastid.json'
+        ]
     subprocess.run(gs_args)
+    subprocess.run(['ls'])
     log_json = None
     with open('lastid.json', 'r') as last_id:
-        log_json = json.loads(last_id)
+        log_json = json.load(last_id)
     remove('lastid.json')
     return log_json['_id']
 
@@ -165,7 +173,7 @@ def update_last_id(last_log) -> None:
     with open('lastid.json', 'w') as log:
         json.dump(last_log, log)
 
-    gs_args = ['gsutil', 'cp', 'lastid.json', 'gs://lloyd-test-pipeline/cidc-logstore/auth0']
+    gs_args = ['gsutil', 'cp', 'lastid.json', AUTH0_DOMAIN + '/' + LOGSTORE + '/auth0']
     subprocess.run(gs_args)
 
 
@@ -178,13 +186,21 @@ def poll_auth0_logs() -> None:
     last_log_id = fetch_last_log_id()
 
     # Get new logs
-    logs_endpoint = AUDIENCE + 'logs?from=' + last_log_id + '&sort=date%3A1'
-    headers = {"Authorization": 'Bearer {}'.format(poll_auth0_logs.token['access_token'])}
+    logs_endpoint = MANAGEMENT_API + 'logs?from=' + last_log_id + '&sort=date%3A1'
+    headers = {"Authorization": 'Bearer {}'.format(poll_auth0_logs.api_token['access_token'])}
     results = requests.get(logs_endpoint, headers=headers)
-    gs_path = "gs://lloyd-test/cidc-logstore/auth0"
+    gs_path = "gs://" + LOGSTORE + '/auth0'
 
     if results.status_code != 200:
-        print(results.reason)
+        log = (
+            'Failed to fetch auth0 logs, Reason: ' +
+            results.reason + ' Status Code: ' + results.status_code
+        )
+        logging.warning({
+            'message': log,
+            'category': 'WARNING-CELERY-LOGGING'
+        })
+
     logs = results.json()
 
     # Update last log ID.
@@ -293,8 +309,7 @@ def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) 
     for person in to_deactivate:
         log = (
             "Revoking accecss for " +
-            person + " for object: " + gs_path +
-            " this should have been done elsewhere, review permissions methods."
+            person + " for object: " + gs_path
         )
         logging.warning({
             'message': log,
@@ -304,6 +319,30 @@ def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) 
         blob.acl.user(person).revoke_write()
 
     blob.acl.save()
+
+
+@APP.task(base=AuthorizedTask)
+def update_trial_blob_acl(trial_id: str, new_acl: List[str]) -> None:
+    """
+    Updates all access control lists for all blobs associated with a given trial.
+
+    Arguments:
+        trial_id {str} -- ID of the trial in question.
+        new_acl {List[str]} -- Up to date list of collaborators on the project.
+    """
+    # Get all data from the project.
+    condition = {'trial': trial_id}
+    projection = {'gs_uri': 1}
+    query = 'data?where=%sprojection=%s' % (json.dumps(condition), json.dumps(projection))
+    trial_data = EVE_FETCHER.get(
+        endpoint=query, token=update_trial_blob_acl.token['access_token']
+    ).json()['_items']
+    gs_paths = [x['gs_uri'] for x in trial_data]
+
+    # Send the new access control list to the manager function, new users get added
+    # removed users get access revoked.
+    for path in gs_paths:
+        manage_bucket_acl(GOOGLE_BUCKET_NAME, path, new_acl)
 
 
 def revoke_access(bucket_name: str, gs_paths: List[str], emails: List[str]) -> None:

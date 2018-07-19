@@ -8,14 +8,16 @@ ENV_FILE = find_dotenv()
 if ENV_FILE:
     load_dotenv(ENV_FILE)
 
-DOMAIN = env.get('DOMAIN')
+AUTH0_DOMAIN = env.get('AUTH0_DOMAIN')
+AUDIENCE = env.get('AUDIENCE')
 CLIENT_SECRET = env.get('CLIENT_SECRET')
 CLIENT_ID = env.get('CLIENT_ID')
-AUDIENCE = env.get('AUDIENCE')
-
-EVE_URL = None
 CROMWELL_URL = None
-RABBIT = None
+GOOGLE_BUCKET_NAME = env.get('GOOGLE_BUCKET_NAME')
+DOMAIN = env.get('DOMAIN')
+EVE_URL = None
+LOGSTORE = env.get('LOGSTORE')
+MANAGEMENT_API = env.get('MANAGEMENT_API')
 
 if not env.get('IN_CLOUD'):
     EVE_URL = 'http://localhost:5000'
