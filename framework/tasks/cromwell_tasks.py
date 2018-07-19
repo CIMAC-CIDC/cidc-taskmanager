@@ -12,7 +12,7 @@ from cidc_utils.requests import SmartFetch
 from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.tasks.administrative_tasks import manage_bucket_acl
 from framework.celery.celery import APP
-from framework.tasks.variables import EVE_URL
+from framework.tasks.variables import EVE_URL, GOOGLE_BUCKET_NAME
 
 EVE_FETCHER = SmartFetch(EVE_URL)
 
@@ -95,12 +95,12 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
                record['file_name'] + ' from ' + old_uri + 'to ' + record['gs_uri'])
         logging.info({
             'message': log,
-            'category': 'TRACK_RECORD'
+            'category': 'FAIR-CELERY-RECORD'
         })
         # Grant access to files in google storage.
         collabs = get_collabs(record['trial'], move_files_from_staging.token['access_token'])
         emails = collabs.json()['_items'][0]['collaborators']
-        manage_bucket_acl('lloyd-test-pipeline', record['gs_uri'], emails)
+        manage_bucket_acl(GOOGLE_BUCKET_NAME, record['gs_uri'], emails)
 
     # when move is completed, insert data objects
     EVE_FETCHER.post(

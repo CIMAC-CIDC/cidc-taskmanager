@@ -24,12 +24,17 @@ APP = Celery(
     ]
 )
 
-
 APP.config_from_object("celeryconfig")
 
 
 @APP.on_after_configure.connect
 def setup_periodic_tasks(sender, **kwargs):
+    """
+    Adds periodic tasks to the application.
+
+    Arguments:
+        sender {[type]} -- [description]
+    """
     # This is needed for celery to actually see what modules are registered to it.
     APP.loader.import_default_modules()
     check_last_login = APP.tasks['framework.tasks.administrative_tasks.check_last_login']

@@ -14,7 +14,13 @@ from cidc_utils.requests import SmartFetch
 from google.cloud import storage
 from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
-from framework.tasks.variables import EVE_URL, MANAGEMENT_API
+from framework.tasks.variables import (
+    EVE_URL,
+    MANAGEMENT_API,
+    AUTH0_DOMAIN,
+    LOGSTORE,
+    GOOGLE_BUCKET_NAME
+)
 
 EVE_FETCHER = SmartFetch(EVE_URL)
 
@@ -167,7 +173,7 @@ def update_last_id(last_log) -> None:
     with open('lastid.json', 'w') as log:
         json.dump(last_log, log)
 
-    gs_args = ['gsutil', 'cp', 'lastid.json', 'gs://lloyd-test-pipeline/cidc-logstore/auth0']
+    gs_args = ['gsutil', 'cp', 'lastid.json', AUTH0_DOMAIN + '/' + LOGSTORE + '/auth0']
     subprocess.run(gs_args)
 
 
@@ -183,12 +189,18 @@ def poll_auth0_logs() -> None:
     logs_endpoint = MANAGEMENT_API + 'logs?from=' + last_log_id + '&sort=date%3A1'
     headers = {"Authorization": 'Bearer {}'.format(poll_auth0_logs.api_token['access_token'])}
     results = requests.get(logs_endpoint, headers=headers)
-    gs_path = "gs://cidc-logstore/auth0"
+    gs_path = "gs://" + LOGSTORE + '/auth0'
 
     if results.status_code != 200:
-        print(results.reason)
-        print(results.status_code)
-        print(results.json())
+        log = (
+            'Failed to fetch auth0 logs, Reason: ' +
+            results.reason + ' Status Code: ' + results.status_code
+        )
+        logging.warning({
+            'message': log,
+            'category': 'WARNING-CELERY-LOGGING'
+        })
+
     logs = results.json()
 
     # Update last log ID.
@@ -297,8 +309,7 @@ def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) 
     for person in to_deactivate:
         log = (
             "Revoking accecss for " +
-            person + " for object: " + gs_path +
-            " this should have been done elsewhere, review permissions methods."
+            person + " for object: " + gs_path
         )
         logging.warning({
             'message': log,
@@ -308,6 +319,30 @@ def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) 
         blob.acl.user(person).revoke_write()
 
     blob.acl.save()
+
+
+@APP.task(base=AuthorizedTask)
+def update_trial_blob_acl(trial_id: str, new_acl: List[str]) -> None:
+    """
+    Updates all access control lists for all blobs associated with a given trial.
+
+    Arguments:
+        trial_id {str} -- ID of the trial in question.
+        new_acl {List[str]} -- Up to date list of collaborators on the project.
+    """
+    # Get all data from the project.
+    condition = {'trial': trial_id}
+    projection = {'gs_uri': 1}
+    query = 'data?where=%sprojection=%s' % (json.dumps(condition), json.dumps(projection))
+    trial_data = EVE_FETCHER.get(
+        endpoint=query, token=update_trial_blob_acl.token['access_token']
+    ).json()['_items']
+    gs_paths = [x['gs_uri'] for x in trial_data]
+
+    # Send the new access control list to the manager function, new users get added
+    # removed users get access revoked.
+    for path in gs_paths:
+        manage_bucket_acl(GOOGLE_BUCKET_NAME, path, new_acl)
 
 
 def revoke_access(bucket_name: str, gs_paths: List[str], emails: List[str]) -> None:
