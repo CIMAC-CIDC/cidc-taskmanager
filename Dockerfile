@@ -1,6 +1,6 @@
 # FROM google/cloud-sdk:198.0.0-alpine
 
-FROM undivideddocker/celery-base
+FROM gcr.io/cidc-dfci/celery-base
 
 COPY ./requirements.txt ./
 RUN pip3 install -r requirements.txt
