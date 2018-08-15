@@ -291,9 +291,10 @@ def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) 
     blob_name = gs_path.replace(pathname, '')[1:]
     blob = bucket.blob(blob_name)
 
+    # Filter out entries without identifiers
+    identified = list(filter(lambda x: 'identifier' in x, blob.acl))
     # If a person is already authorized, don't add them again.
-    existing = [entry['identifier'] for entry in blob.acl]
-
+    existing = [entry['identifier'] for entry in identified]
     # Check for discrepancies in the auth lists.
     to_deactivate = list(filter(lambda x: x not in collaborators, existing))
     to_add = list(filter(lambda x: x not in existing, collaborators))
