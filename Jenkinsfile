@@ -66,7 +66,7 @@ spec:
       }
       steps {
         container('docker') {
-          sh 'docker build -t celery-taskmanager .'
+          sh 'docker build -t celery-taskmanager . --no-cache'
           sh 'docker tag celery-taskmanager gcr.io/cidc-dfci/celery-taskmanager:staging'
           sh 'docker push gcr.io/cidc-dfci/celery-taskmanager:staging'
         }
