@@ -189,7 +189,7 @@ def create_analysis_entry(
     if data_to_upload:
         return EVE_FETCHER.post(token=token, endpoint='data', json=data_to_upload, code=201)
     return None
-        
+
 
 def check_for_runs() -> Tuple[requests.Response, requests.Response]:
     """
@@ -262,7 +262,14 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
         token=analysis_pipeline.token['access_token'], endpoint=query_string)
 
     if not record_response.status_code == 200:
-        print(record_response.reason)
+        error_msg = (
+            'Failed to fetch record: ' +
+            record_response.reason + ': ' + record_response.status_code
+        )
+        logging.error({
+            'message': error_msg,
+            'category': 'ERROR-CELERY-QUERY'
+        })
         raise RuntimeError('Failed to fetch records')
 
     return record_response, assay_response
@@ -314,7 +321,12 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
             input_dictionary[run_prefix + '.' + record['mapping']] = record['gs_uri']
         else:
             input_dictionary[record['mapping']] = record['gs_uri']
-    print(input_dictionary)
+
+    input_message = "Input Dictionary Created: \n" + json.dumps(input_dictionary)
+    logging.info({
+        'message': input_message,
+        'category': 'INFO-CELERY-DEBUG'
+    })
     return input_dictionary
 
 
@@ -422,7 +434,11 @@ def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):
                 record_ids, all_free = check_processed(records)
 
                 if not all_free:
-                    print('Record involved in run has already been used')
+                    message = 'Record involved in run has already been used' + str(sample_assay['_id']['trial'])
+                    logging.warning({
+                        'message': message,
+                        'category': 'WARNING-CELERY-PIPELINES'
+                    })
                     set_record_processed(record_ids, False)
                     return []
 
@@ -430,7 +446,11 @@ def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):
                 status = set_record_processed(record_ids, True)
 
                 if not status:
-                    print("Patch operation failed! Aborting!")
+                    message = "Patch operation failed! Aborting!" + str(sample_assay['_id']['trial'])
+                    logging.error({
+                        'message': message,
+                        'category': 'ERROR-CELERY-PIPELINE'
+                    })
                     set_record_processed(record_ids, False)
                     return []
 
