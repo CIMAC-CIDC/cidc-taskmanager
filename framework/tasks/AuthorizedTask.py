@@ -5,7 +5,9 @@ Task subclass that allows processes to share a token
 import time
 import requests
 from celery import Task
-from framework.tasks.variables import CLIENT_SECRET, CLIENT_ID, AUDIENCE, MANAGEMENT_API
+from framework.tasks.variables import (
+    CLIENT_SECRET, CLIENT_ID, AUDIENCE, MANAGEMENT_API, AUTH0_DOMAIN
+)
 
 
 def get_token() -> dict:
@@ -21,7 +23,7 @@ def get_token() -> dict:
         'client_secret': CLIENT_SECRET,
         'audience': AUDIENCE
     }
-    res = requests.post("https://cidc-test.auth0.com/oauth/token", json=payload)
+    res = requests.post("https://" + AUTH0_DOMAIN + "/oauth/token", json=payload)
     return {
         'access_token': res.json()['access_token'],
         'expires_in': res.json()['expires_in'],
@@ -31,7 +33,7 @@ def get_token() -> dict:
 
 def get_management_token() -> dict:
     """[summary]
-    
+
     Returns:
         dict -- [description]
     """
@@ -73,7 +75,7 @@ class AuthorizedTask(Task):
         elif time.time() - self._token['time_fetched'] > self._token['expires_in']:
             self._token = get_token()
         return self._token
-    
+
     @property
     def api_token(self):
         """
