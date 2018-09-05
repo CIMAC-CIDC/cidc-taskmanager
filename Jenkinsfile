@@ -17,8 +17,8 @@ spec:
     volumeMounts:
     - mountPath: /var/run/docker.sock
       name: docker-volume
-  - name: helm
-    image: lachlanevenson/k8s-helm
+  - name: gcloud
+    image: google/cloud-sdk:alpine
     command:
     - cat
     tty: true
@@ -77,11 +77,19 @@ spec:
           branch 'staging'
       }
       steps {
-        container('helm') {
+        container('gcloud') {
+          sh 'apk add git --no-cache'
+          sh 'apk add curl --no-cache'
+          sh 'apk add bash --no-cache'
+          sh 'apk add openssl --no-cache'
+          sh 'gcloud container clusters get-credentials cidc-prod-cluster --zone us-east1-c --project cidc-dfci'
+          sh 'curl https://raw.githubusercontent.com/kubernetes/helm/master/scripts/get > get_helm.sh'
+          sh 'chmod 700 get_helm.sh'
+          sh './get_helm.sh --version v2.10.0'
           sh 'helm init --client-only'
           sh 'helm repo add cidc "http://${CIDC_CHARTMUSEUM_SERVICE_HOST}:${CIDC_CHARTMUSEUM_SERVICE_PORT}" '
           sh 'sleep 10'
-          sh 'helm upgrade celery-taskmanager cidc/celery-taskmanager --set deploy=${deploy} --set image.tag=staging'
+          sh 'helm upgrade celery-taskmanager cidc/celery-taskmanager --set imageSHA=$(gcloud container images list-tags --format='get(digest)' --filter='tags:staging' gcr.io/cidc-dfci/celery-taskmanager) --set image.tag=staging'
         }
       }
     }
