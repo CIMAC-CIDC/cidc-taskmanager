@@ -45,7 +45,7 @@ def setup_periodic_tasks(sender, **kwargs):
     })
     # Check for user expirey once per day, check for auth0 logs every 5 minutes
     sender.add_periodic_task(86400, check_last_login.s())
-    sender.add_periodic_task(300, poll_auth0_logs.s())
+    sender.add_periodic_task(86400, poll_auth0_logs.s())
 
 
 if __name__ == '__main__':

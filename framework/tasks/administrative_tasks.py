@@ -180,7 +180,6 @@ def fetch_last_log_id() -> str:
         'gsutil', 'cp', 'gs://cidc-logstore/auth0/lastid.json', './lastid.json'
         ]
     subprocess.run(gs_args)
-    subprocess.run(['ls'])
     log_json = None
     with open('lastid.json', 'r') as last_id:
         log_json = json.load(last_id)

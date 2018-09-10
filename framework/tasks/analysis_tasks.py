@@ -214,13 +214,13 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
             ]
         }]
         assay_response: [{
-            non_static_inputs: [
+            static_inputs: [
                 {
                     key_name: "...",
                     key_value: "..."
                 }
             ],
-            static_inputs: ["...","..."],
+            non_static_inputs: ["...","..."],
             wdl_location: "..."
         }]
     """

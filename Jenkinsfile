@@ -82,7 +82,7 @@ spec:
           sh 'apk add curl --no-cache'
           sh 'apk add bash --no-cache'
           sh 'apk add openssl --no-cache'
-          sh 'gcloud container clusters get-credentials cidc-prod-cluster --zone us-east1-c --project cidc-dfci'
+          sh 'gcloud container clusters get-credentials cidc-cluster-staging --zone us-east1-c --project cidc-dfci'
           sh 'curl https://raw.githubusercontent.com/kubernetes/helm/master/scripts/get > get_helm.sh'
           sh 'chmod 700 get_helm.sh'
           sh './get_helm.sh --version v2.10.0'
