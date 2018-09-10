@@ -89,7 +89,7 @@ spec:
           sh 'helm init --client-only'
           sh 'helm repo add cidc "http://${CIDC_CHARTMUSEUM_SERVICE_HOST}:${CIDC_CHARTMUSEUM_SERVICE_PORT}" '
           sh 'sleep 10'
-          sh '''helm upgrade celery-taskmanager cidc/celery-taskmanager -f ./kubernetes/helm/celery-taskmanager/values.yaml -f ./kubernetes/helm/celery-taskmanager/values_staging.yaml --set imageSHA=$(gcloud container images list-tags --format='get(digest)' --filter='tags:staging' gcr.io/cidc-dfci/celery-taskmanager)'''
+          sh '''helm upgrade celery-taskmanager cidc/celery-taskmanager -f ./kubernetes/helm/celery-taskmanager/values_staging.yaml --set imageSHA=$(gcloud container images list-tags --format='get(digest)' --filter='tags:staging' gcr.io/cidc-dfci/celery-taskmanager)'''
         }
       }
     }
