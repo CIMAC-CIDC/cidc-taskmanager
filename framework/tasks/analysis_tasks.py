@@ -230,7 +230,15 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
         'wdl_location': 1
     }
 
-    assay_query_string = "assays?projection=%s" % (json.dumps(assay_projection))
+    # Filter out any assay that does not have a wdl associated with it.
+    pipeline_filter = {
+        'wdl_location': {
+            '$ne': 'null'
+        }
+    }
+
+    assay_query_string = "assays?where=%s&projection=%s" % (
+        json.dumps(pipeline_filter), json.dumps(assay_projection))
 
     # Contains a list of all the running assays and their inputs
     assay_response = EVE_FETCHER.get(
@@ -434,7 +442,8 @@ def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):
                 record_ids, all_free = check_processed(records)
 
                 if not all_free:
-                    message = 'Record involved in run has already been used' + str(sample_assay['_id']['trial'])
+                    message = 'Record involved in run has already been used' + str(
+                        sample_assay['_id']['trial'])
                     logging.warning({
                         'message': message,
                         'category': 'WARNING-CELERY-PIPELINES'
@@ -446,7 +455,8 @@ def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):
                 status = set_record_processed(record_ids, True)
 
                 if not status:
-                    message = "Patch operation failed! Aborting!" + str(sample_assay['_id']['trial'])
+                    message = "Patch operation failed! Aborting!" + str(
+                        sample_assay['_id']['trial'])
                     logging.error({
                         'message': message,
                         'category': 'ERROR-CELERY-PIPELINE'
