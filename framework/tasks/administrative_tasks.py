@@ -133,8 +133,8 @@ def test_eve_rate_limit(num_requests: int) -> bool:
     for i in range(num_requests):
         try:
             EVE_FETCHER.get(token=test_eve_rate_limit.token['access_token'], endpoint='test')
-        except ValueError:
-            if i > 50:
+        except RuntimeError:
+            if i > 0:
                 print('rate-limit worked!')
                 return True
             else:

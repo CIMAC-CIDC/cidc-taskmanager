@@ -18,7 +18,7 @@ spec:
     - mountPath: /var/run/docker.sock
       name: docker-volume
   - name: gcloud
-    image: google/cloud-sdk:alpine
+    image: gcr.io/cidc-dfci/gcloud-helm:latest
     command:
     - cat
     tty: true
@@ -78,14 +78,7 @@ spec:
       }
       steps {
         container('gcloud') {
-          sh 'apk add git --no-cache'
-          sh 'apk add curl --no-cache'
-          sh 'apk add bash --no-cache'
-          sh 'apk add openssl --no-cache'
           sh 'gcloud container clusters get-credentials cidc-cluster-staging --zone us-east1-c --project cidc-dfci'
-          sh 'curl https://raw.githubusercontent.com/kubernetes/helm/master/scripts/get > get_helm.sh'
-          sh 'chmod 700 get_helm.sh'
-          sh './get_helm.sh --version v2.10.0'
           sh 'helm init --client-only'
           sh 'helm repo add cidc "http://${CIDC_CHARTMUSEUM_SERVICE_HOST}:${CIDC_CHARTMUSEUM_SERVICE_PORT}" '
           sh 'sleep 10'
