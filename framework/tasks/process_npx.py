@@ -3,11 +3,40 @@
 Module for tasks that do post-run processing of output files.
 """
 import logging
-from typing import List, Generator
+from typing import List, Generator, NamedTuple
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
 OLINK_FIRST_COLUMN = [None, "NPX data", "Panel", "Assay", "Uniprot ID", "OlinkID"]
+
+
+class SampleInfo(NamedTuple):
+    """
+    Basic store for sample related info.
+
+    Attributes:
+        plate_gen {Generator} -- plate info
+        qc_gen {Generator} -- qc info
+        sample_ids {List[str]} -- id list
+
+    Arguments:
+        NamedTuple {[type]} -- [description]
+    """
+
+    plate_gen: Generator
+    qc_gen: Generator
+    sample_ids: List[str]
+
+
+class AssayColumn(NamedTuple):
+    """
+    Structure for holding all the generators needed to get assay information
+    from olink files.
+    """
+
+    assay_info_gen: Generator
+    assay_metrics_gen: Generator
+    data_col_gen: Generator
 
 
 def validate_row_headers(generator: Generator, error_list: List[dict]) -> int:
@@ -47,16 +76,12 @@ def validate_row_headers(generator: Generator, error_list: List[dict]) -> int:
     return olink_row
 
 
-def validate_qc_info(
-    plate_gen: Generator, qc_gen: Generator, sample_ids: List[str], errors: List[dict]
-) -> List[dict]:
+def validate_qc_info(generators: SampleInfo, errors: List[dict]) -> List[dict]:
     """
     Loops over the qc/plateid info and returns it in a formatted list.
 
     Arguments:
-        plate_gen {Generator} -- Generator to fetch the plate column.
-        qc_gen {Generator} -- Generator to fetch the qc column.
-        sample_ids {List[str]} -- List of sample ids.
+        generators {SampleInfo} -- Simple namedtuple.
         errors {List[dict]} -- List of errors.
 
     Returns:
@@ -65,9 +90,11 @@ def validate_qc_info(
     sample_list = []
     try:
         # Generator should have a single column.
-        plate_col = next(plate_gen)
-        qc_col = next(qc_gen)
-        for plate_cell, qc_cell, sample_id in zip(plate_col, qc_col, sample_ids):
+        plate_col = next(generators.plate_gen)
+        qc_col = next(generators.qc_gen)
+        for plate_cell, qc_cell, sample_id in zip(
+            plate_col, qc_col, generators.sample_ids
+        ):
             sample_list.append(
                 {
                     "sample_id": sample_id,
@@ -88,22 +115,14 @@ def validate_qc_info(
 
 
 def extract_assay_data(
-    assay_info_gen: Generator,
-    assay_metrics_gen: Generator,
-    data_col_gen: Generator,
-    sample_ids: List[str],
-    errors: List[dict],
+    assay_obj: AssayColumn, sample_ids: List[str], errors: List[dict]
 ) -> List[dict]:
     """
     Takes a generator of assay info cells and data containing cells, and returns the
     data in a formatted manner.
 
     Arguments:
-        assay_info_gen {generator} -- Columnwise generator for the assay-specific info. \
-        this should contain the panel name, assay name, uniprot id, and olink id.
-        assay_metrics_gen {generator} -- Columnwise generator for LOD/missing data freq.
-        data_col_gen {generator} -- Coulmnwise generator for the actual data. Should contain \
-        one cell for every sample.
+        assay_obj {AssayColumn} -- namedtuple that holds all the generators for data processing.
         sample_ids {List[str]} -- List of sample_ids.
         errors {List[dict]} -- A list of parsing errors that have been found.
 
@@ -115,7 +134,7 @@ def extract_assay_data(
     """
     assay_list = []
     for assay_def, data, metrics in zip(
-        assay_info_gen, data_col_gen, assay_metrics_gen
+        assay_obj.assay_info_gen, assay_obj.data_col_gen, assay_obj.assay_metrics_gen
     ):
         # Create the assay definition.
         olink_assay = {
@@ -257,15 +276,17 @@ def process_olink_npx(path: str, trial_id: str, assay_id: str, record_id: str) -
             max_row=samples_end_row,
         )
 
-        # Process the two generators to get a list of olink assay objects.
+        assay_info_obj = AssayColumn(assay_info_gen, assay_metrics_gen, data_col_gen)
         olink_record["ol_assay"] = extract_assay_data(
-            assay_info_gen, assay_metrics_gen, data_col_gen, sample_ids, errors
+            assay_info_obj, sample_ids, errors
         )
 
         # Get the sample-specific information.
-        olink_record["samples"] = validate_qc_info(
-            plate_gen, qc_info, sample_ids, errors
-        )
+        info_obj = SampleInfo(plate_gen, qc_info, sample_ids)
+        olink_record["samples"] = validate_qc_info(info_obj, errors)
+
+        # Get NPX Manager Version
+        olink_record["npx_m_ver"] = wks['B1'].value
 
     except InvalidFileException as err:
         log = (
