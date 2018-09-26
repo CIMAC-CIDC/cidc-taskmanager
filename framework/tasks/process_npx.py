@@ -3,6 +3,7 @@
 Module for tasks that do post-run processing of output files.
 """
 import logging
+import subprocess
 from typing import List, Generator, NamedTuple
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
@@ -179,6 +180,22 @@ def extract_assay_data(
     return assay_list
 
 
+def add_file_extension(path: str, extension: str) -> str:
+    """[summary]
+    
+    Arguments:
+        path {str} -- [description]
+        extension {str} -- [description]
+    
+    Returns:
+        str -- [description]
+    """
+    newpath = '%s.%s' % (path, extension)
+    args = ['mv', path, newpath]
+    subprocess.run(args)
+    return newpath
+
+
 def process_olink_npx(path: str, trial_id: str, assay_id: str, record_id: str) -> dict:
     """
     Processes an olink npx file and creates a record.
@@ -201,9 +218,11 @@ def process_olink_npx(path: str, trial_id: str, assay_id: str, record_id: str) -
     olink_row = None
     mdf_row = None
 
+    xlsx_path = add_file_extension(path, 'xlsx')
+
     try:
         # Try to load the file.
-        workb = load_workbook(path)
+        workb = load_workbook(xlsx_path)
         # Load the sheet
         wks = workb.active
         # Grab cells from column A
