@@ -149,7 +149,7 @@ def check_last_login() -> None:
     Function that scans the user collection for inactive accounts and deletes any if found.
     """
     # Get list of accounts and their last logins.
-    projection = {'last_access': 1, 'e-mail': 1}
+    projection = {'last_access': 1, 'email': 1}
     query = 'accounts?projection=%s' % (json.dumps(projection))
     user_results = EVE_FETCHER.get(
         token=check_last_login.token['access_token'], endpoint=query
@@ -284,7 +284,7 @@ def change_user_role(user_id: str, token: str, new_role: str, authorizer: str) -
         endpoint=url, token=token, headers=headers, json={'role': new_role}
         )
     log = (
-        "Role change for user: " + user_doc['e-mail'] + ' from ' + user_doc['role'] +
+        "Role change for user: " + user_doc['email'] + ' from ' + user_doc['role'] +
         ' to ' + new_role + ' authorized by ' + authorizer
     )
     logging.info({

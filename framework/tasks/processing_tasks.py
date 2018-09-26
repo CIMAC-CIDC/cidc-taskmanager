@@ -230,7 +230,7 @@ PROC = {
     "cnv": {"re": r"_segments", "func": process_table},
     "rsem_expression": {"re": r"_expression.genes$", "func": process_rsem},
     "rsem_isoforms": {"re": r"_expression.isoforms$", "func": process_table},
-    "olink_npx": {"re": r"olink.*npx", "func": process_olink_npx},
+    "olink": {"re": r"olink.*npx", "func": process_olink_npx},
 }
 
 
@@ -248,14 +248,14 @@ def process_file(rec: dict, pro: str) -> bool:
         boolean -- Status of the operation.
     """
     eve_fetcher = SmartFetch(EVE_URL)
-    gs_args = ["gsutil", "cp", rec["gs_uri"], "temp_file"]
+    temp_file_name = str(uuid4())
+    gs_args = ["gsutil", "cp", rec["gs_uri"], temp_file_name]
     subprocess.run(gs_args)
-
+    res = None
     try:
         # Use a random filename as tasks are executing in parallel.
-        temp_file_name = str(uuid4())
         records = PROC[pro]["func"](
-            "temp_file", rec["trial"]["$oid"], rec["assay"]["$oid"], rec["_id"]["$oid"]
+            temp_file_name, rec["trial"]["$oid"], rec["assay"]["$oid"], rec["_id"]["$oid"]
         )
         remove(temp_file_name)
     except OSError:
@@ -263,24 +263,37 @@ def process_file(rec: dict, pro: str) -> bool:
         pass
 
     try:
-        eve_fetcher.post(
+        res = eve_fetcher.post(
             endpoint=pro,
             token=process_file.token["access_token"],
             code=201,
             json=records,
         )
-        for record in records:
-            log = (
-                "Record: "
-                + record["file_name"]
-                + " added to collection: "
-                + pro
-                + " on trial: "
-                + record["trial"]["$oid"]
-                + " on assay "
-                + record["assay"]["$oid"]
-            )
-            logging.info({"message": log, "category": "FAIR-CELERY-RECORD"})
+        if isinstance(records, (list,)):
+            for record in records:
+                log = (
+                    "Record: "
+                    + record["file_name"]
+                    + " added to collection: "
+                    + pro
+                    + " on trial: "
+                    + record["trial"]["$oid"]
+                    + " on assay "
+                    + record["assay"]["$oid"]
+                )
+                logging.info({"message": log, "category": "FAIR-CELERY-RECORD"})
+            return True
+        log = (
+            "Record: "
+            + records["file_name"]
+            + " added to collection: "
+            + pro
+            + " on trial: "
+            + records["trial"]["$oid"]
+            + " on assay "
+            + records["assay"]["$oid"]
+        )
+        logging.info({"message": log, "category": "FAIR-CELERY-RECORD"})
         return True
     except RuntimeError:
         logging.error(
@@ -328,7 +341,7 @@ def postprocessing(records: List[dict]) -> None:
     result = job.apply_async()
 
     for task in tasks:
-        info = "Task: " + task + " is now starting"
+        info = "Task: " + task.name + " is now starting"
         logging.info({"message": info, "category": "DEBUG-CELERY-PROCESSING"})
 
     # Wait for jobs to finish.
