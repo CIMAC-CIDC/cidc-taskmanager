@@ -119,12 +119,37 @@ def delete_user_account(user_email: str, token: str) -> None:
 
 
 @APP.task(base=AuthorizedTask)
+def test_eve_rate_limit(num_requests: int) -> bool:
+    """
+    Task to test if eve's rate-limit functionality is working.
+
+    Arguments:
+        num_requests {int} -- Number of requests to ping eve with
+
+    Returns:
+        bool -- True if application is rate limited,
+        false if it fails for other reasons or fails to be limited.
+    """
+    for i in range(num_requests):
+        try:
+            EVE_FETCHER.get(token=test_eve_rate_limit.token['access_token'], endpoint='test')
+        except RuntimeError:
+            if i > 0:
+                print('rate-limit worked!')
+                return True
+            else:
+                print('There seems to be a problem with your URL.')
+                return False
+        return False
+
+
+@APP.task(base=AuthorizedTask)
 def check_last_login() -> None:
     """
     Function that scans the user collection for inactive accounts and deletes any if found.
     """
     # Get list of accounts and their last logins.
-    projection = {'last_access': 1, 'e-mail': 1}
+    projection = {'last_access': 1, 'email': 1}
     query = 'accounts?projection=%s' % (json.dumps(projection))
     user_results = EVE_FETCHER.get(
         token=check_last_login.token['access_token'], endpoint=query
@@ -155,7 +180,6 @@ def fetch_last_log_id() -> str:
         'gsutil', 'cp', 'gs://cidc-logstore/auth0/lastid.json', './lastid.json'
         ]
     subprocess.run(gs_args)
-    subprocess.run(['ls'])
     log_json = None
     with open('lastid.json', 'r') as last_id:
         log_json = json.load(last_id)
@@ -217,7 +241,7 @@ def poll_auth0_logs() -> None:
         gs_args = ['gsutil', 'cp', temp_file_name, gs_path]
         subprocess.run(gs_args)
 
-    log = "Logging operation successfull"
+    log = "Logging operation successfull" + 'logs written to: ' + gs_path
     logging.info({
         'message': log,
         'category': 'FAIR-CELERY-LOGGING'
@@ -260,7 +284,7 @@ def change_user_role(user_id: str, token: str, new_role: str, authorizer: str) -
         endpoint=url, token=token, headers=headers, json={'role': new_role}
         )
     log = (
-        "Role change for user: " + user_doc['e-mail'] + ' from ' + user_doc['role'] +
+        "Role change for user: " + user_doc['email'] + ' from ' + user_doc['role'] +
         ' to ' + new_role + ' authorized by ' + authorizer
     )
     logging.info({

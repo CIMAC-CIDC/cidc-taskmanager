@@ -13,10 +13,12 @@ google-cloud-storage = "*"
 "nose2" = "*"
 python-json-logger = "*"
 python-dateutil = "*"
+openpyxl = "*"
 
 [dev-packages]
 pylint = "*"
 "pep8" = "*"
+black = "*"
 
 [requires]
 python_version = "3.6"
