@@ -313,7 +313,6 @@ def postprocessing(records: List[dict]) -> None:
     tasks = []
 
     for rec in records:
-        print(rec)
         message = "Processing: " + rec["file_name"]
         logging.info({"message": message, "category": "FAIR-CELERY-PROCESSING"})
         for pro in PROC:
