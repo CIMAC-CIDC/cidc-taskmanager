@@ -14,7 +14,8 @@ from celery import group
 from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.celery.celery import APP
 from framework.tasks.variables import EVE_URL
-from framework.tasks.process_npx import process_olink_npx
+from framework.tasks.process_npx import process_olink_npx, process_clinical_metadata
+from framework.tasks.data_classes import RecordContext
 
 HAPLOTYPE_FIELD_NAMES = [
     "allele_group",
@@ -24,17 +25,30 @@ HAPLOTYPE_FIELD_NAMES = [
 ]
 
 
-def process_hla_file(
-    hla_path: str, trial_id: str, assay_id: str, record_id: str
-) -> dict:
+def add_record_context(records: List[dict], context: RecordContext) -> None:
+    """
+    Adds the trial, assay, and record ID to a processed record.
+
+    Arguments:
+        records {List[dict]} -- List of records.
+        context {RecordContext} -- Context object containing assay/trial/parentID.
+
+    Returns:
+        None -- [description]
+    """
+    for record in records:
+        record.update(
+            {"trial": context.rial, "assay": context.assay, "record_id": context.record}
+        )
+
+
+def process_hla_file(hla_path: str, context: RecordContext) -> dict:
     """
     Turns an .hla file into an array of HLA mongo entries.
 
     Arguments:
         hla_path {str} -- Path to input file.
-        trial_id {str} -- Trial ID of run.
-        assay_id {str} -- Assay ID of run.
-        record_id {str} -- Mongo ID of parent record.
+        context {RecordContext} -- Context object containing assay/trial/parentID.
 
     Returns:
         [dict] -- Array of HLA mongo records.
@@ -48,9 +62,9 @@ def process_hla_file(
                 hla_record = {
                     "gene_name": columns[0],
                     "haplotypes": [],
-                    "assay": assay_id,
-                    "trial": trial_id,
-                    "record_id": record_id,
+                    "assay": context.assay,
+                    "trial": context.trial,
+                    "record_id": context.record,
                 }
                 for i in range(1, len(columns)):
                     haplotype = columns[i]
@@ -89,22 +103,16 @@ def process_hla_file(
                     },
                     exc_info=True,
                 )
-
-    if hla_records:
-        return hla_records
-    return None
+    return hla_records
 
 
-def process_table(path: str, trial_id: str, assay_id: str, record_id: str) -> dict:
+def process_table(path: str, context: RecordContext) -> dict:
     """
     Processes any table format data assuming the first row is a header row.
 
     Arguments:
         path {str} -- Path to file.
-        trial_id {str} -- Trial ID that file belongs to.
-        assay_id {str} -- Assay ID that file belongs to.
-        record_id {str} -- Mongo ID of the parent file.
-        sample_id {str} -- Sample ID that run was performed on.
+        context {RecordContext} -- Context object containing assay/trial/parentID.
 
     Raises:
         IndexError -- [description]
@@ -140,26 +148,17 @@ def process_table(path: str, trial_id: str, assay_id: str, record_id: str) -> di
                     )
                 )
 
-    [
-        entry.update({"trial": trial_id, "assay": assay_id, "record_id": record_id})
-        for entry in entries
-    ]
-
-    if entries:
-        return entries
-    return None
+    add_record_context(entries, context)
+    return entries
 
 
-def process_rsem(path: str, trial_id: str, assay_id: str, record_id: str) -> dict:
+def process_rsem(path: str, context: RecordContext) -> dict:
     """
     Processes an rsem type table.
 
     Arguments:
         path {str} -- Path to file.
-        trial_id {str} -- Trial ID that file belongs to.
-        assay_id {str} -- Assay ID that file belongs to.
-        record_id {str} -- Mongo ID of the parent file.
-        sample_id {str} -- Sample ID that run was performed on.
+        context {RecordContext} -- Context object containing assay/trial/parentID.
 
     Raises:
         IndexError -- [description]
@@ -200,14 +199,8 @@ def process_rsem(path: str, trial_id: str, assay_id: str, record_id: str) -> dic
                     )
                 )
 
-    [
-        entry.update({"trial": trial_id, "assay": assay_id, "record_id": record_id})
-        for entry in entries
-    ]
-
-    if entries:
-        return entries
-    return None
+    add_record_context(entries, context)
+    return entries
 
 
 # This is a dictionary of all the currently supported filetypes for storage in
@@ -231,6 +224,7 @@ PROC = {
     "rsem_expression": {"re": r"_expression.genes$", "func": process_rsem},
     "rsem_isoforms": {"re": r"_expression.isoforms$", "func": process_table},
     "olink": {"re": r"olink.*npx", "func": process_olink_npx},
+    "olink_meta": {"re": r"olink.*biorepository", "func": process_clinical_metadata} 
 }
 
 
@@ -245,17 +239,20 @@ def process_file(rec: dict, pro: str) -> bool:
         corresponds to.
 
     Returns:
-        boolean -- Status of the operation.
+        boolean -- True if completed without error, else false.
     """
     eve_fetcher = SmartFetch(EVE_URL)
     temp_file_name = str(uuid4())
     gs_args = ["gsutil", "cp", rec["gs_uri"], temp_file_name]
     subprocess.run(gs_args)
-    res = None
+
     try:
         # Use a random filename as tasks are executing in parallel.
         records = PROC[pro]["func"](
-            temp_file_name, rec["trial"]["$oid"], rec["assay"]["$oid"], rec["_id"]["$oid"]
+            temp_file_name,
+            RecordContext(
+                rec["trial"]["$oid"], rec["assay"]["$oid"], rec["_id"]["$oid"]
+            ),
         )
         remove(temp_file_name)
     except OSError:
@@ -263,7 +260,7 @@ def process_file(rec: dict, pro: str) -> bool:
         pass
 
     try:
-        res = eve_fetcher.post(
+        eve_fetcher.post(
             endpoint=pro,
             token=process_file.token["access_token"],
             code=201,
@@ -273,7 +270,6 @@ def process_file(rec: dict, pro: str) -> bool:
             for record in records:
                 log = (
                     "Record: "
-                    + record["file_name"]
                     + " added to collection: "
                     + pro
                     + " on trial: "
@@ -285,13 +281,12 @@ def process_file(rec: dict, pro: str) -> bool:
             return True
         log = (
             "Record: "
-            + records["file_name"]
             + " added to collection: "
             + pro
             + " on trial: "
-            + records["trial"]["$oid"]
+            + records["trial"]
             + " on assay "
-            + records["assay"]["$oid"]
+            + records["assay"]
         )
         logging.info({"message": log, "category": "FAIR-CELERY-RECORD"})
         return True
@@ -313,14 +308,12 @@ def postprocessing(records: List[dict]) -> None:
     If so, they are processed and then uploaded to mongo.
 
     Arguments:
-        records {List[dict]} -- [description]
-
-    Returns:
-        None -- [description]
+        records {List[dict]} -- List of records slated for processing.
     """
     tasks = []
 
     for rec in records:
+        print(rec)
         message = "Processing: " + rec["file_name"]
         logging.info({"message": message, "category": "FAIR-CELERY-PROCESSING"})
         for pro in PROC:
@@ -330,14 +323,7 @@ def postprocessing(records: List[dict]) -> None:
                 # If a match is found, add to job queue
                 tasks.append(process_file.s(rec, pro))
 
-    job = None
-    # Grouping is slightly different depending on length of array.
-    if len(tasks) == 1:
-        job = group(tasks)
-    else:
-        job = group(*tasks)
-
-    # Start all jobs in parallel
+    job = group(tasks) if len(tasks) == 1 else group(*tasks)
     result = job.apply_async()
 
     for task in tasks:
@@ -357,4 +343,3 @@ def postprocessing(records: List[dict]) -> None:
                 "category": "ERROR-CELERY-PROCESSING",
             }
         )
-

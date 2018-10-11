@@ -10,5 +10,5 @@ if [ -z ${base_rebuild+x} ]; then
 fi
 
 docker build -t "celery-taskmanager" . --no-cache
-docker tag celery-taskmanager gcr.io/cidc-dfci/celery-taskmanager:latest
-docker push gcr.io/cidc-dfci/celery-taskmanager:latest
+docker tag celery-taskmanager gcr.io/cidc-dfci/celery-taskmanager:dev
+docker push gcr.io/cidc-dfci/celery-taskmanager:dev
