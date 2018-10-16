@@ -4,12 +4,17 @@ Module for tasks that do post-run processing of output files.
 """
 import logging
 import subprocess
-from os import remove
+import time
 from datetime import datetime
+from os import remove
 from typing import Generator, List, NamedTuple, Tuple
 
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
+from selenium import webdriver
+from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.webdriver.support.ui import Select
+from selenium.common.exceptions import NoSuchElementException
 
 from framework.tasks.data_classes import RecordContext
 
@@ -21,7 +26,7 @@ MANIFEST_HEADERS = {
     "request:": "request",
     "assay priority:": "assay_priority",
     "assay type:": "assay_type",
-    "batch number:": "batch_number"
+    "batch number:": "batch_number",
 }
 
 SHIPPING_DETAILS = {
@@ -125,6 +130,98 @@ def mk_error(
         "raw_or_parse": raw_or_parse,
         "severity": severity,
     }
+
+
+def wait_for_ui(
+    driver: WebDriver, x_path: str, timeout: float = 5.0, interval: float = 1.0
+):
+    """
+    Function for fetching web elements that may take a bit of time to load.
+
+    Arguments:
+        driver {WebDriver} -- WebDriver opened to the page in question.
+        x_path {str} -- Xpath of desired element.
+
+    Keyword Arguments:
+        timeout {float} -- Maximum wait time. (default: {5.0})
+        interval {float} -- Interval to check if object has loaded. (default: {1.0})
+
+    Returns:
+        [type] -- [description]
+    """
+    elapsed = 0
+    element = None
+    while not element and elapsed < (timeout / interval):
+        try:
+            element = driver.find_element_by_xpath(x_path)
+            time.sleep(interval)
+            element += 1
+        except NoSuchElementException:
+            pass
+
+    return element if element else None
+
+
+def find_invalid_symbols(symbol_list: List[str], wks: dict):
+    """
+    Uses the hugo multi-symbol checker to check a list of gene symbols. Returns list of
+    invalid symbols or an empty list if all valid.
+
+    Arguments:
+        symbol_list {List[str]} -- List of gene symbols to check.
+        wks {dict} -- Worksheet object.
+    """
+
+    # Get page
+    driver = webdriver.Firefox()
+    driver.get("https://www.genenames.org/cgi-bin/symbol_checker")
+
+    # Close modal
+    cookies_dialogue = wait_for_ui(driver, "/html/body/div[1]/div/div/a")
+    if cookies_dialogue:
+        cookies_dialogue.click()
+
+    # Find input box
+    input_element = wait_for_ui(driver, """//*[@id="data"]""")
+    input_element.send_keys(", ".join(symbol_list))
+
+    # Change dropdown to return TSV
+    selection = wait_for_ui(driver, '//*[@id="format"]')
+    Select(selection).select_by_index(1)
+
+    # Click submit button
+    driver.find_element_by_xpath(
+        "/html/body/div[3]/div/div[2]/div/div/div/div[2]/div/div[1]/div/form/div[3]/div/input[1]"
+    ).click()
+
+    # Wait for results to load.
+    pre_area = wait_for_ui(driver, "/html/body/pre", timeout=10, interval=0.5)
+
+    if not pre_area:
+        wks["wks"].append(
+            mk_error(
+                explanation="Error ocurred while trying to check the gene list",
+                affected_paths=["ol_assay"],
+            )
+        )
+
+    # Check to see if all genes check out.
+    gene_table = pre_area.get_attribute("textContent").strip()
+
+    invalid_symbols = [
+        line.split("\t")[0]
+        for line in gene_table.split("\n")
+        if line.split("\t")[1] == "Unmatched"
+    ]
+
+    if invalid_symbols:
+        wks["wks"]["validation_errors"].append(
+            mk_error(
+                explanation="The following invalid gene symbols were found in your document: %s"
+                % ", ".join(invalid_symbols),
+                affected_paths=["ol_assay"],
+            )
+        )
 
 
 def add_file_extension(path: str, extension: str) -> str:
@@ -462,7 +559,7 @@ def cast_cell_value(cell) -> object:
             if isinstance(cell.value, int):
                 return int(cell.value)
         if isinstance(cell.value, datetime):
-                return str(cell.value)
+            return cell.value
         return cell.value
     return None
 
@@ -478,10 +575,7 @@ def extract_cell_values(generator: Generator) -> List[object]:
     Returns:
         List[object] -- List of the values of the cells.
     """
-    values = []
-    for cell in generator:
-        values.append(cast_cell_value(cell[0]))
-    return values
+    return list(map(lambda cell: cast_cell_value(cell[0]), generator))
 
 
 def parse_matched_column(
@@ -616,7 +710,7 @@ def process_clinical_metadata(path: str, context: RecordContext) -> dict:
                 min_row=header_row + 1,
                 min_col=column,
                 max_col=column + len(header_fields) - 1,
-                max_row=wks_record["wks"].max_column
+                max_row=wks_record["wks"].max_column,
             )
         )
         lazy_remove(xlsx_path)
@@ -707,6 +801,11 @@ def process_olink_npx(path: str, context: RecordContext) -> dict:
             sample_ids,
             olink_record["validation_errors"],
         )
+
+        # Check gene symbols
+        # find_invalid_symbols(
+        #    [assay["assay"] for assay in olink_record["ol_assay"]], wks
+        #)
 
         # Get the sample-specific information.
         olink_record["samples"] = validate_qc_info(

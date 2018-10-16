@@ -39,21 +39,22 @@ def get_run_log(run_id: str) -> dict:
     return json.dumps(log_data)
 
 
-def add_meta_item(analysis_info: dict, key: str, value: object) -> dict:
+def add_meta_item(analysis_info: dict, entry: dict) -> dict:
     """
     Packages cromwell output into a mongo entry
 
     Arguments:
         analysis_info {dict} -- Dictionary containing run information, specifically emails and
             data records.
-        key {str} -- [description]
-        value {object} -- [description]
+        entry {dict} -- Key-value pair.
 
     Returns:
         dict -- [description]
     """
     record = analysis_info["record"]
+    (key, value), = entry.items()
     manage_bucket_acl("lloyd-test-pipeline", value, analysis_info["emails"])
+
     return {
         "file_name": key,
         "gs_uri": value,
@@ -67,7 +68,7 @@ def add_meta_item(analysis_info: dict, key: str, value: object) -> dict:
 
 
 def meta_parse(
-    analysis_info: dict, parent_key: str, item: object, filegen: dict
+    analysis_info: dict, parent_key: str, item: object, filegen: List[dict]
 ) -> None:
     """
     Takes a metadata output JSON from a cromwell run, and returns a list of records
@@ -78,10 +79,10 @@ def meta_parse(
         analysis_info {dict} -- Run information.
         parent_key {str} -- Key under which the entry is listed.
         item {object} -- The output json value being processed.
-        filegen {List} -- List of files being handled.
+        filegen {List[dict]} -- List of files being handled.
     """
     if isinstance(item, str):
-        fil = add_meta_item(analysis_info, parent_key, item)
+        fil = add_meta_item(analysis_info, {parent_key: item})
         filegen.append(fil)
     elif isinstance(item, list):
         for sub_item in item:
@@ -96,7 +97,7 @@ def create_analysis_entry(analysis_info: dict, _etag: str, token: str) -> dict:
     Updates the analysis entry with the information from the completed run.
 
     Arguments:
-        analysis_info {str} -- Information on the run.
+        analysis_info {dict} -- Information on the run.
         _etag {str} -- Etag value for patching.
         token {str} -- Access token.
 
