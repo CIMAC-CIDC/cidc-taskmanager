@@ -52,11 +52,11 @@ def get_user_records(matched_trials: List[dict], token: str) -> List[str]:
     Gets a list of the GCS paths for all objects the user is authorized tos ee.
 
     Arguments:
-        matched_trials {[dict]} -- List of objects specifying trial ids and etags.
+        matched_trials {List[dict]} -- List of objects specifying trial ids and etags.
         token {str} -- API access token.
 
     Returns:
-        [str] -- List of GCS paths.
+        List[str] -- List of GCS paths.
     """
     trial_ids = [trial["_id"] for trial in matched_trials]
     condition = {"trial": {"$in": trial_ids}}
@@ -133,8 +133,8 @@ def test_eve_rate_limit(num_requests: int) -> bool:
         num_requests {int} -- Number of requests to ping eve with
 
     Returns:
-        bool -- True if application is rate limited,
-        false if it fails for other reasons or fails to be limited.
+        bool -- True if application is rate limited, false if it fails for other reasons or
+            fails to be limited.
     """
     for i in range(num_requests):
         try:
@@ -216,19 +216,17 @@ def poll_auth0_logs() -> None:
     last_log_id = fetch_last_log_id()
 
     # Get new logs
-    logs_endpoint = MANAGEMENT_API + "logs?from=" + last_log_id + "&sort=date%3A1"
+    logs_endpoint = "%slogs?from=%s&sort=date%%3A1" % (MANAGEMENT_API, last_log_id)
     headers = {
         "Authorization": "Bearer {}".format(poll_auth0_logs.api_token["access_token"])
     }
     results = requests.get(logs_endpoint, headers=headers)
-    gs_path = "gs://" + LOGSTORE + "/auth0"
+    gs_path = "gs://%s/auth0" % LOGSTORE
 
     if results.status_code != 200:
-        log = (
-            "Failed to fetch auth0 logs, Reason: "
-            + results.reason
-            + " Status Code: "
-            + results.status_code
+        log = "Failed to fetch auth0 logs, Reason: %s Status Code: %s" % (
+            results.reason,
+            results.status_code,
         )
         logging.warning({"message": log, "category": "WARNING-CELERY-LOGGING"})
 
@@ -245,10 +243,9 @@ def poll_auth0_logs() -> None:
             json.dump(log_entry, log_file)
 
         # Copy file to bucket
-        gs_args = ["gsutil", "cp", temp_file_name, gs_path]
-        subprocess.run(gs_args)
+        subprocess.run(["gsutil", "cp", temp_file_name, gs_path])
 
-    log = "Logging operation successfull" + "logs written to: " + gs_path
+    log = "Logging operation successfull, logs written to: " + gs_path
     logging.info({"message": log, "category": "FAIR-CELERY-LOGGING"})
 
 
@@ -288,16 +285,13 @@ def change_user_role(user_id: str, token: str, new_role: str, authorizer: str) -
     EVE_FETCHER.patch(
         endpoint=url, token=token, headers=headers, json={"role": new_role}
     )
-    log = (
-        "Role change for user: "
-        + user_doc["email"]
-        + " from "
-        + user_doc["role"]
-        + " to "
-        + new_role
-        + " authorized by "
-        + authorizer
+    log = "Role change for user: %s from %s to %s authorized by: %s" % (
+        user_doc["email"],
+        user_doc["role"],
+        new_role,
+        authorizer,
     )
+
     logging.info({"message": log, "category": "FAIR-CELERY-ACCOUNTS"})
 
 
@@ -319,8 +313,7 @@ def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) 
         )
         return
 
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
+    bucket = storage.Client().bucket(bucket_name)
     pathname = "gs://" + bucket_name
     blob_name = gs_path.replace(pathname, "")[1:]
     blob = bucket.blob(blob_name)
@@ -334,12 +327,12 @@ def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) 
     to_add = list(filter(lambda x: x not in existing, collaborators))
 
     for person in to_add:
-        log = "Gave read access to " + person + " for object: " + gs_path
+        log = "Gave read access to %s for object: %s" % (person, gs_path)
         logging.info({"message": log, "category": "FAIR-CELERY-PERMISSIONS"})
         blob.acl.user(person).grant_read()
 
     for person in to_deactivate:
-        log = "Revoking accecss for " + person + " for object: " + gs_path
+        log = "Revoking accecss for %s for object: %s" % (person, gs_path)
         logging.warning({"message": log, "category": "FAIR-CELERY-PERMISSIONS"})
         blob.acl.user(person).revoke_read()
         blob.acl.user(person).revoke_write()
@@ -372,6 +365,13 @@ def update_trial_blob_acl(trial_id: str, new_acl: List[str]) -> None:
     # removed users get access revoked.
     for path in gs_paths:
         manage_bucket_acl(GOOGLE_BUCKET_NAME, path, new_acl)
+
+
+@APP.task(base=AuthorizedTask)
+def grant_bucket_upload(bucket_name, user_emails):
+    bucket = storage.Client().bucket(bucket_name)
+    for email in user_emails:
+        bucket.acl.user(email).grant_write()
 
 
 def revoke_access(bucket_name: str, gs_paths: List[str], emails: List[str]) -> None:

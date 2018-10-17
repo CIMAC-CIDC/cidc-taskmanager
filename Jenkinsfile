@@ -80,9 +80,12 @@ spec:
         container('gcloud') {
           sh 'gcloud container clusters get-credentials cidc-cluster-staging --zone us-east1-c --project cidc-dfci'
           sh 'helm init --client-only'
+          sh 'cat ${CA_CERT_PEM} > $(helm home)/ca.pem'
+          sh 'cat ${HELM_CERT_PEM} > $(helm home)/cert.pem'
+          sh 'cat ${HELM_KEY_PEM} > $(helm home)/key.pem'
           sh 'helm repo add cidc "http://${CIDC_CHARTMUSEUM_SERVICE_HOST}:${CIDC_CHARTMUSEUM_SERVICE_PORT}" '
           sh 'sleep 10'
-          sh '''helm upgrade celery-taskmanager cidc/celery-taskmanager --set imageSHA=$(gcloud container images list-tags --format='get(digest)' --filter='tags:staging' gcr.io/cidc-dfci/celery-taskmanager) --set image.tag=staging'''
+          sh '''helm upgrade celery-taskmanager cidc/celery-taskmanager --set imageSHA=$(gcloud container images list-tags --format='get(digest)' --filter='tags:staging' gcr.io/cidc-dfci/celery-taskmanager) --set image.tag=staging --tls'''
         }
       }
     }
