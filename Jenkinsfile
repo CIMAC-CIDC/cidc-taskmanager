@@ -32,6 +32,9 @@ spec:
   environment {
       GOOGLE_APPLICATION_CREDENTIALS = credentials('google-service-account')
       deploy = "${UUID.randomUUID().toString()}"
+      CA_CERT_PEM = credentials("ca.cert.pem")
+      HELM_CERT_PEM = credentials("helm.cert.pem")
+      HELM_KEY_PEM = credentials("helm.key.pem")
   }
   stages {
     stage('Checkout SCM') {
