@@ -5,20 +5,18 @@ Module for tasks that do post-run processing of output files.
 import logging
 import subprocess
 import time
+import requests
 from datetime import datetime
 from os import remove
 from typing import Generator, List, NamedTuple, Tuple
 
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
-from selenium import webdriver
-from selenium.webdriver.remote.webdriver import WebDriver
-from selenium.webdriver.support.ui import Select
-from selenium.common.exceptions import NoSuchElementException
 
 from framework.tasks.data_classes import RecordContext
 
 OLINK_FIRST_COLUMN = ["npx data", "panel", "assay", "uniprot id", "olinkid"]
+HUGO_URL = "https://genenames.org/cgi-bin/tools/symbol-check"
 
 MANIFEST_HEADERS = {
     "manifest id:": "manifest_id",
@@ -132,96 +130,49 @@ def mk_error(
     }
 
 
-def wait_for_ui(
-    driver: WebDriver, x_path: str, timeout: float = 5.0, interval: float = 1.0
-):
-    """
-    Function for fetching web elements that may take a bit of time to load.
-
-    Arguments:
-        driver {WebDriver} -- WebDriver opened to the page in question.
-        x_path {str} -- Xpath of desired element.
-
-    Keyword Arguments:
-        timeout {float} -- Maximum wait time. (default: {5.0})
-        interval {float} -- Interval to check if object has loaded. (default: {1.0})
-
-    Returns:
-        [type] -- [description]
-    """
-    elapsed = 0
-    element = None
-    while not element and elapsed < (timeout / interval):
-        try:
-            element = driver.find_element_by_xpath(x_path)
-            time.sleep(interval)
-            element += 1
-        except NoSuchElementException:
-            pass
-
-    return element if element else None
-
-
-def find_invalid_symbols(symbol_list: List[str], wks: dict):
+def find_invalid_symbols(symbol_list: List[str]) -> List[str]:
     """
     Uses the hugo multi-symbol checker to check a list of gene symbols. Returns list of
     invalid symbols or an empty list if all valid.
 
     Arguments:
         symbol_list {List[str]} -- List of gene symbols to check.
-        wks {dict} -- Worksheet object.
+
+    Returns:
+        List[str] -- List of invalid gene symbols.
     """
+    data = {
+        "approved": "true",
+        "case": "insensitive",
+        "output": "html",
+        "previous": "true",
+        "synonyms": "true",
+        "unmatched": "true",
+        "withdrawn": "true",
+        "queries[]": symbol_list,
+    }
 
-    # Get page
-    driver = webdriver.Firefox()
-    driver.get("https://www.genenames.org/cgi-bin/symbol_checker")
+    response = requests.post(HUGO_URL, data=data)
 
-    # Close modal
-    cookies_dialogue = wait_for_ui(driver, "/html/body/div[1]/div/div/a")
-    if cookies_dialogue:
-        cookies_dialogue.click()
-
-    # Find input box
-    input_element = wait_for_ui(driver, """//*[@id="data"]""")
-    input_element.send_keys(", ".join(symbol_list))
-
-    # Change dropdown to return TSV
-    selection = wait_for_ui(driver, '//*[@id="format"]')
-    Select(selection).select_by_index(1)
-
-    # Click submit button
-    driver.find_element_by_xpath(
-        "/html/body/div[3]/div/div[2]/div/div/div/div[2]/div/div[1]/div/form/div[3]/div/input[1]"
-    ).click()
-
-    # Wait for results to load.
-    pre_area = wait_for_ui(driver, "/html/body/pre", timeout=10, interval=0.5)
-
-    if not pre_area:
-        wks["wks"].append(
-            mk_error(
-                explanation="Error ocurred while trying to check the gene list",
-                affected_paths=["ol_assay"],
-            )
+    if not response.status_code == 200:
+        return mk_error(
+            "Unable to contact Hugo server for gene symbol validation",
+            affected_paths="ol_assays",
         )
 
-    # Check to see if all genes check out.
-    gene_table = pre_area.get_attribute("textContent").strip()
-
-    invalid_symbols = [
-        line.split("\t")[0]
-        for line in gene_table.split("\n")
-        if line.split("\t")[1] == "Unmatched"
+    unmatched = [
+        symbol["input"]
+        for symbol in response.json()
+        if symbol["matchType"] == "Unmatched"
     ]
 
-    if invalid_symbols:
-        wks["wks"]["validation_errors"].append(
-            mk_error(
-                explanation="The following invalid gene symbols were found in your document: %s"
-                % ", ".join(invalid_symbols),
-                affected_paths=["ol_assay"],
-            )
+    if unmatched:
+        return mk_error(
+            "Found invalid gene symbols: %s" % (", ".join(unmatched)),
+            affected_paths=["ol_assay"],
         )
+
+    return None
 
 
 def add_file_extension(path: str, extension: str) -> str:
@@ -559,7 +510,7 @@ def cast_cell_value(cell) -> object:
             if isinstance(cell.value, int):
                 return int(cell.value)
         if isinstance(cell.value, datetime):
-            return cell.value
+            return str(cell.value)
         return cell.value
     return None
 
@@ -803,9 +754,11 @@ def process_olink_npx(path: str, context: RecordContext) -> dict:
         )
 
         # Check gene symbols
-        # find_invalid_symbols(
-        #    [assay["assay"] for assay in olink_record["ol_assay"]], wks
-        #)
+        invalid_err = find_invalid_symbols(
+            [assay["assay"] for assay in olink_record["ol_assay"]]
+        )
+        if invalid_err:
+            olink_record["validation_errors"].append(invalid_err)
 
         # Get the sample-specific information.
         olink_record["samples"] = validate_qc_info(
