@@ -141,7 +141,6 @@ def find_invalid_symbols(symbol_list: List[str]) -> List[str]:
     Returns:
         List[str] -- List of invalid gene symbols.
     """
-    print(symbol_list)
     data = {
         "approved": "true",
         "case": "insensitive",
@@ -160,8 +159,6 @@ def find_invalid_symbols(symbol_list: List[str]) -> List[str]:
             "Unable to contact Hugo server for gene symbol validation",
             affected_paths="ol_assays",
         )
-
-    print(response.text)
 
     unmatched = [
         symbol["input"]
@@ -753,7 +750,6 @@ def process_olink_npx(path: str, context: RecordContext) -> dict:
             )
 
         # Check gene symbols
-        print(olink_record["ol_assay"])
         invalid_err = find_invalid_symbols(
             [assay["assay"] for assay in olink_record["ol_assay"]]
         )
