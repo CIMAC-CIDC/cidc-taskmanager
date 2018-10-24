@@ -114,6 +114,6 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
     EVE_FETCHER.post(
         token=move_files_from_staging.token["access_token"],
         json=files,
-        endpoint="data",
+        endpoint="data_edit",
         code=201,
     )

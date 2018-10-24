@@ -250,8 +250,8 @@ def log_record_upload(records: List[dict], endpoint: str) -> None:
         log = "Record: %s added to collection: %s on trial: %s on assay: %s" % (
             record["file_name"] if "file_name" in record else " ",
             endpoint,
-            record["trial"]["$oid"],
-            record["assay"]["$oid"],
+            record["trial"],
+            record["assay"],
         )
         logging.info({"message": log, "category": "FAIR-CELERY-RECORD"})
 
@@ -291,7 +291,8 @@ def report_validation_issues(response: dict, records: List[dict]) -> List[dict]:
 
 
 def update_child_list(record_response: dict, endpoint: str, parent_id: str) -> dict:
-    """[summary]
+    """
+    Adds item to parent record's child list.
 
     Arguments:
         record {dict} -- [description]
@@ -301,43 +302,38 @@ def update_child_list(record_response: dict, endpoint: str, parent_id: str) -> d
         dict -- [description]
     """
     fetcher = SmartFetch(EVE_URL)
-    url = "data/%s" % (parent_id)
+    query = {"_id": parent_id}
+
     records = None
-    if '_items' in record_response:
+    if "_items" in record_response:
         records = record_response["_items"]
     else:
         records = [record_response]
 
     new_children = []
     for record in records:
-        new_children.append({
-            "_id": record["_id"],
-            "resource": endpoint
-        })
-    update = {
-        '$push': {
-            "children": {
-                "$each": new_children
-            }
-        }
-    }
+        new_children.append({"_id": record["_id"], "resource": endpoint})
 
     try:
         # Get etag of parent.
         parent = fetcher.get(
-            endpoint=url, token=process_file.token["access_token"]
+            endpoint="data?where=%s" % json.dumps(query),
+            token=process_file.token["access_token"],
         ).json()
 
         # Update parent record.
         res = requests.post(
-            EVE_URL + url,
-            json=update,
+            EVE_URL + "/data_edit/%s" % str(parent["_items"][0]["_id"]),
+            json={"children": parent["_items"][0]["children"] + new_children},
             headers={
-                "If-Match": parent["_etag"],
+                "If-Match": parent["_items"][0]["_etag"],
                 "Authorization": "Bearer {}".format(process_file.token["access_token"]),
                 "X-HTTP-Method-Override": "PATCH",
             },
         )
+        if not res.status_code == 201:
+            print(res.reason)
+            print(res.json())
         return res
     except RuntimeError:
         if parent.status_code != 200:
