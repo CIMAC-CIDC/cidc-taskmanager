@@ -153,7 +153,6 @@ def find_invalid_symbols(symbol_list: List[str]) -> List[str]:
     }
 
     response = requests.post(HUGO_URL, data=data)
-    print(response)
     if not response.status_code == 200:
         return mk_error(
             "Unable to contact Hugo server for gene symbol validation",
