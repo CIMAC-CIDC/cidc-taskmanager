@@ -217,7 +217,7 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
     # of the outputs, so the string must be parsed to cut off the run name unlike the
     # user-uploaded files which can be matched against the whole name.
     input_names = [
-        item.split(".", 1)[1]
+        item.split(".", 1)[1] if len(item.split(".", 1)) == 2 else item
         for sublist in [x["non_static_inputs"] for x in assay_response]
         for item in sublist
     ]
@@ -228,21 +228,18 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
     aggregate_query = {"$inputs": sought_mappings + input_names}
 
     query_string = "data/query?aggregate=%s" % (json.dumps(aggregate_query))
-    record_response = EVE_FETCHER.get(
-        token=analysis_pipeline.token["access_token"], endpoint=query_string
-    )
 
-    if not record_response.status_code == 200:
-        error_msg = (
-            "Failed to fetch record: "
-            + record_response.reason
-            + ": "
-            + record_response.status_code
+    try:
+        record_response = EVE_FETCHER.get(
+            token=analysis_pipeline.token["access_token"], endpoint=query_string
+        )
+        return record_response, assay_response
+    except RuntimeError:
+        error_msg = "Failed to fetch record: %s. %s" % (
+            record_response.reason,
+            record_response.status_code,
         )
         logging.error({"message": error_msg, "category": "ERROR-CELERY-QUERY"})
-        raise RuntimeError("Failed to fetch records")
-
-    return record_response, assay_response
 
 
 def create_input_json(sample_assay: dict, assay: dict) -> dict:
@@ -382,15 +379,13 @@ def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):
             if sample_assay["_id"]["trial"] in trial_ids and len(
                 sample_assay["records"]
             ) == len(assay["non_static_inputs"]):
-
-                assay_id = assay["_id"]
-                trial_id = sample_assay["_id"]["trial"]
-                sample_id = sample_assay["_id"]["sample_id"]
+                if not "sample_id" in sample_assay["_id"]:
+                    continue
 
                 payload = {
-                    "trial": str(trial_id),
-                    "assay": str(assay_id),
-                    "samples": [str(sample_id)],
+                    "trial": str(sample_assay["_id"]["trial"]),
+                    "assay": str(assay["_id"]),
+                    "samples": [str(sample_assay["_id"]["sample_id"])],
                 }
 
                 # Query all records to make sure not processed
@@ -408,9 +403,7 @@ def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):
                     return []
 
                 # Patch all to ensure atomicity
-                status = set_record_processed(record_ids, True)
-
-                if not status:
+                if not set_record_processed(record_ids, True):
                     message = "Patch operation failed! Aborting!" + str(
                         sample_assay["_id"]["trial"]
                     )
