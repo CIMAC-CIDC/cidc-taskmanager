@@ -16,7 +16,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from framework.tasks.data_classes import RecordContext
 
 OLINK_FIRST_COLUMN = ["npx data", "panel", "assay", "uniprot id", "olinkid"]
-HUGO_URL = "https://genenames.org/cgi-bin/tools/symbol-check"
+HUGO_URL = 'https://beta.genenames.org/cgi-bin/tools/symbol-check'
 
 MANIFEST_HEADERS = {
     "manifest id:": "manifest_id",
@@ -144,7 +144,7 @@ def find_invalid_symbols(symbol_list: List[str]) -> List[str]:
     data = {
         "approved": "true",
         "case": "insensitive",
-        "output": "html",
+        "output": "text",
         "previous": "true",
         "synonyms": "true",
         "unmatched": "true",
@@ -153,7 +153,6 @@ def find_invalid_symbols(symbol_list: List[str]) -> List[str]:
     }
 
     response = requests.post(HUGO_URL, data=data)
-
     if not response.status_code == 200:
         return mk_error(
             "Unable to contact Hugo server for gene symbol validation",
@@ -364,7 +363,7 @@ def process_sample_rows(cell_gen: Generator) -> Tuple[int, int, int, int, List[s
             olink ID has been seen.
 
     Returns:
-        Tuple[int, int, int, int, List[str]] -- Tuple containing in order, row of first sample,
+        Tuple[int, int, int, List[str]] -- Tuple containing in order, row of first sample,
             row of last sample, row of missing data frequency, panel type row, and list of sample
             ids.
     """
@@ -378,9 +377,6 @@ def process_sample_rows(cell_gen: Generator) -> Tuple[int, int, int, int, List[s
         if value == "Missing Data freq.":
             mdf_row = sam_cell[0].row
         # If a value is a sampleID, note it down.
-        elif value == "Panel":
-            # Quick way to get the panel name
-            panel_type_cell = sam_cell[0].row
         elif value and value != "LOD":
             sample_cells.append(sam_cell[0])
             sample_ids.append(value)
@@ -389,7 +385,6 @@ def process_sample_rows(cell_gen: Generator) -> Tuple[int, int, int, int, List[s
         sample_cells[0].row,
         sample_cells[-1].row,
         mdf_row,
-        panel_type_cell,
         sample_ids,
     )
 
@@ -697,22 +692,9 @@ def process_olink_npx(path: str, context: RecordContext) -> dict:
         olink_row = validate_column((OLINK_FIRST_COLUMN, 1), wks_record)[1]
         cell_gen = wks.iter_rows(max_col=1, min_row=olink_row + 1)
         # Big function to generate a bunch of important information.
-        samples_start_row, samples_end_row, mdf_row, panel_coords, sample_ids = process_sample_rows(
+        samples_start_row, samples_end_row, mdf_row, sample_ids = process_sample_rows(
             cell_gen
         )
-
-        if panel_coords:
-            olink_record["ol_panel_type"] = wks[panel_coords][1].value
-        else:
-            olink_record["ol_panel_type"] = None
-            olink_record["validation_errors"].append(
-                {
-                    "explanation": ("Unable to determine panel type"),
-                    "affected_paths": ["ol_panel_type"],
-                    "raw_or_parse": "PARSE",
-                    "severity": "WARNING",
-                }
-            )
 
         if not mdf_row:
             olink_record["validation_errors"].append(
@@ -752,6 +734,19 @@ def process_olink_npx(path: str, context: RecordContext) -> dict:
             sample_ids,
             olink_record["validation_errors"],
         )
+
+        if olink_record["ol_assay"][0]["panel"]:
+            olink_record["ol_panel_type"] = olink_record["ol_assay"][0]["panel"]
+        else:
+            olink_record["ol_panel_type"] = None
+            olink_record["validation_errors"].append(
+                {
+                    "explanation": ("Unable to determine panel type"),
+                    "affected_paths": ["ol_panel_type"],
+                    "raw_or_parse": "PARSE",
+                    "severity": "WARNING",
+                }
+            )
 
         # Check gene symbols
         invalid_err = find_invalid_symbols(
