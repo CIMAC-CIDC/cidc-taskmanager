@@ -2,26 +2,25 @@
 """
 Module for tasks that do post-run processing of output files.
 """
+import json
+import logging
 import re
 import subprocess
 import time
-import json
-import logging
-import requests
-from uuid import uuid4
 from os import remove
 from typing import List
-from cidc_utils.requests import SmartFetch
+from uuid import uuid4
+
+import requests
 from celery import group
-from framework.tasks.AuthorizedTask import AuthorizedTask
+from cidc_utils.requests import SmartFetch
+
 from framework.celery.celery import APP
-from framework.tasks.variables import EVE_URL
-from framework.tasks.process_npx import (
-    process_olink_npx,
-    process_clinical_metadata,
-    mk_error,
-)
+from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.tasks.data_classes import RecordContext
+from framework.tasks.process_npx import (mk_error, process_clinical_metadata,
+                                         process_olink_npx)
+from framework.tasks.variables import EVE_URL
 
 HAPLOTYPE_FIELD_NAMES = [
     "allele_group",
@@ -44,7 +43,7 @@ def add_record_context(records: List[dict], context: RecordContext) -> None:
     """
     for record in records:
         record.update(
-            {"trial": context.rial, "assay": context.assay, "record_id": context.record}
+            {"trial": context.trial, "assay": context.assay, "record_id": context.record}
         )
 
 
@@ -331,9 +330,9 @@ def update_child_list(record_response: dict, endpoint: str, parent_id: str) -> d
                 "X-HTTP-Method-Override": "PATCH",
             },
         )
-        if not res.status_code == 201:
-            print(res.reason)
-            print(res.json())
+        if not res.status_code == 200:
+            raise RuntimeError
+
         return res
     except RuntimeError:
         if parent.status_code != 200:
@@ -394,7 +393,7 @@ def process_file(rec: dict, pro: str) -> bool:
         update_child_list(response.json(), pro, rec["_id"]["$oid"])
 
         # Simplify handling later
-        if isinstance(records, (list,)):
+        if not isinstance(records, (list,)):
             records = [records]
 
         # Record uploads.
