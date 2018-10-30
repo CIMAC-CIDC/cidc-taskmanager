@@ -14,7 +14,7 @@ from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
 from framework.tasks.AuthorizedTask import AuthorizedTask
-from framework.tasks.cromwell_tasks import get_collabs, manage_bucket_acl
+from framework.tasks.cromwell_tasks import manage_bucket_acl
 from framework.tasks.variables import CROMWELL_URL, EVE_URL
 
 EVE_FETCHER = SmartFetch(EVE_URL)
@@ -92,7 +92,7 @@ def meta_parse(
             meta_parse(analysis_info, key, value, filegen)
 
 
-def create_analysis_entry(analysis_info: dict, _etag: str, token: str) -> dict:
+def create_analysis_entry(analysis_info: dict, token: str) -> dict:
     """
     Updates the analysis entry with the information from the completed run.
 
@@ -134,7 +134,7 @@ def create_analysis_entry(analysis_info: dict, _etag: str, token: str) -> dict:
     patch_res = requests.patch(
         EVE_URL + "/analysis/" + analysis_info["record"]["analysis_id"],
         json=payload_object,
-        headers={"If-Match": _etag, "Authorization": "Bearer {}".format(token)},
+        headers={"If-Match": analysis_info["_etag"], "Authorization": "Bearer {}".format(token)},
     )
 
     if not patch_res.status_code == 200:
@@ -473,13 +473,6 @@ def analysis_pipeline():
 
             # If run has finished, make a record.
             if response not in ["Submitted", "Running"]:
-
-                # Fetch collaborators to control access.
-                collabs = get_collabs(
-                    record["trial"], analysis_pipeline.token["access_token"]
-                )
-                emails = collabs.json()["_items"][0]["collaborators"]
-
                 create_analysis_entry(
                     {
                         "record": record,
@@ -488,7 +481,6 @@ def analysis_pipeline():
                         "_etag": run["analysis_etag"],
                     },
                     analysis_pipeline.token["access_token"],
-                    emails,
                 )
                 # Add run to filter list.
                 filter_runs.append(run)
