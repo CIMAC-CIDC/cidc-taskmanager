@@ -131,16 +131,20 @@ def create_analysis_entry(analysis_info: dict, token: str) -> dict:
             meta_parse(analysis_info, key, value, filegen)
 
     # Insert the analysis object
-    patch_res = requests.patch(
-        EVE_URL + "/analysis/" + analysis_info["record"]["analysis_id"],
-        json=payload_object,
-        headers={"If-Match": analysis_info["_etag"], "Authorization": "Bearer {}".format(token)},
-    )
-
-    if not patch_res.status_code == 200:
-        log = "Error communicating with eve: %s" % patch_res.reason
-        logging.error({"message": log, "category": "ERROR-CELERY"})
-        raise RuntimeError
+    try:
+        EVE_FETCHER.patch(
+            endpoint="analysis",
+            item_id=analysis_info["record"]["analysis_id"],
+            _etag=analysis_info["_etag"],
+            token=token,
+            json=payload_object,
+        )
+    except RuntimeError as error:
+        log = "Error patching analysis object: %s, code: %s" % (
+            analysis_info["record"]["analysis_id"],
+            str(error),
+        )
+        logging.error({"message": log, "category": "ERROR-CELERY-ANALYSIS-PATCH"})
 
     # Insert data
     if filegen:

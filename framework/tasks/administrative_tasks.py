@@ -36,7 +36,7 @@ def get_user_trials(user_email: str, token: str) -> List[dict]:
         token {str} -- JWT for API access.
 
     Returns:
-        [type] -- [description]
+        List[dict] -- List of trials user is a collaborator on.
     """
     collabs = {"collaborators": user_email}
     projection = {"_id": 1}
@@ -92,16 +92,11 @@ def clear_permissions(user_id: str, token: str) -> None:
     query = "accounts/%s" % user_id
     user_etag = EVE_FETCHER.get(endpoint=query, token=token)["_etag"]
     update = {"permissions": []}
-    del_res = requests.post(
-        EVE_URL,
-        headers={
-            "If-Match": user_etag,
-            "Authorization": "Bearer {}".format(token),
-            "X-HTTP-Method-Override": "PATCH",
-        },
-        json=update,
-    )
-    if not del_res.status_code == 200:
+    try:
+        EVE_FETCHER.patch(
+            endpoint="accounts", _etag=user_etag, token=token, json=update
+        )
+    except RuntimeError:
         log = "Error attempting to clear permissions for user %s" % user_id
         logging.error({"message": log, "category": "ERROR-CELERY-USER-FAIR"})
 
@@ -120,23 +115,16 @@ def deactivate_account(user: dict, token: str) -> None:
     # Update all of those trials to remove the individual.
     update = {"$pull": {"collaborators": user["email"]}}
     for trial in matched_trials:
-        url = "trials/" + trial["_id"]
-        status = requests.post(
-            url,
-            headers={
-                "If-Match": trial["_etag"],
-                "Authorization": "Bearer {}".format(token),
-                "X-HTTP-Method-Override": "PATCH",
-            },
-            json=update,
-        )
-        if status.status_code == 200:
+        try:
+            EVE_FETCHER.patch(
+                endpoint="trials", item_id=trial["_id"], token=token, json=update
+            )
             per_log = "User: %s removed as collaborator from trial: %s" % (
                 user["email"],
                 trial["_id"],
             )
             logging.info({"message": per_log, "category": "FAIR-CELERY-PERMISSIONS"})
-        else:
+        except RuntimeError:
             per_log = "Error trying to delete %s from collaborators for trial %s" % (
                 user["email"],
                 trial["_id"],
@@ -332,9 +320,8 @@ def change_user_role(user_id: str, token: str, new_role: str, authorizer: str) -
     """
     url = "accounts/" + user_id
     user_doc = EVE_FETCHER.get(endpoint=url, token=token)
-    headers = {"If-Match": user_doc["_etag"]}
     EVE_FETCHER.patch(
-        endpoint=url, token=token, headers=headers, json={"role": new_role}
+        endpoint=url, token=token, _etag=user_doc["_etag"], json={"role": new_role}
     )
     log = "Role change for user: %s from %s to %s authorized by: %s" % (
         user_doc["email"],
