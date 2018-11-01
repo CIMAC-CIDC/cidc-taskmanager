@@ -1,5 +1,3 @@
-# FROM google/cloud-sdk:198.0.0-alpine
-
 FROM gcr.io/cidc-dfci/celery-base
 
 COPY ./requirements.txt ./

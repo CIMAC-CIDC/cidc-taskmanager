@@ -2,19 +2,25 @@
 """
 Module for tasks that do post-run processing of output files.
 """
+import json
+import logging
 import re
 import subprocess
 import time
-import logging
-from uuid import uuid4
 from os import remove
 from typing import List
-from cidc_utils.requests import SmartFetch
+from uuid import uuid4
+
+import requests
 from celery import group
-from framework.tasks.AuthorizedTask import AuthorizedTask
+from cidc_utils.requests import SmartFetch
+
 from framework.celery.celery import APP
+from framework.tasks.AuthorizedTask import AuthorizedTask
+from framework.tasks.data_classes import RecordContext
+from framework.tasks.process_npx import (mk_error, process_clinical_metadata,
+                                         process_olink_npx)
 from framework.tasks.variables import EVE_URL
-from framework.tasks.process_npx import process_olink_npx
 
 HAPLOTYPE_FIELD_NAMES = [
     "allele_group",
@@ -24,17 +30,30 @@ HAPLOTYPE_FIELD_NAMES = [
 ]
 
 
-def process_hla_file(
-    hla_path: str, trial_id: str, assay_id: str, record_id: str
-) -> dict:
+def add_record_context(records: List[dict], context: RecordContext) -> None:
+    """
+    Adds the trial, assay, and record ID to a processed record.
+
+    Arguments:
+        records {List[dict]} -- List of records.
+        context {RecordContext} -- Context object containing assay/trial/parentID.
+
+    Returns:
+        None -- [description]
+    """
+    for record in records:
+        record.update(
+            {"trial": context.trial, "assay": context.assay, "record_id": context.record}
+        )
+
+
+def process_hla_file(hla_path: str, context: RecordContext) -> dict:
     """
     Turns an .hla file into an array of HLA mongo entries.
 
     Arguments:
         hla_path {str} -- Path to input file.
-        trial_id {str} -- Trial ID of run.
-        assay_id {str} -- Assay ID of run.
-        record_id {str} -- Mongo ID of parent record.
+        context {RecordContext} -- Context object containing assay/trial/parentID.
 
     Returns:
         [dict] -- Array of HLA mongo records.
@@ -48,9 +67,9 @@ def process_hla_file(
                 hla_record = {
                     "gene_name": columns[0],
                     "haplotypes": [],
-                    "assay": assay_id,
-                    "trial": trial_id,
-                    "record_id": record_id,
+                    "assay": context.assay,
+                    "trial": context.trial,
+                    "record_id": context.record,
                 }
                 for i in range(1, len(columns)):
                     haplotype = columns[i]
@@ -89,22 +108,16 @@ def process_hla_file(
                     },
                     exc_info=True,
                 )
-
-    if hla_records:
-        return hla_records
-    return None
+    return hla_records
 
 
-def process_table(path: str, trial_id: str, assay_id: str, record_id: str) -> dict:
+def process_table(path: str, context: RecordContext) -> dict:
     """
     Processes any table format data assuming the first row is a header row.
 
     Arguments:
         path {str} -- Path to file.
-        trial_id {str} -- Trial ID that file belongs to.
-        assay_id {str} -- Assay ID that file belongs to.
-        record_id {str} -- Mongo ID of the parent file.
-        sample_id {str} -- Sample ID that run was performed on.
+        context {RecordContext} -- Context object containing assay/trial/parentID.
 
     Raises:
         IndexError -- [description]
@@ -140,26 +153,17 @@ def process_table(path: str, trial_id: str, assay_id: str, record_id: str) -> di
                     )
                 )
 
-    [
-        entry.update({"trial": trial_id, "assay": assay_id, "record_id": record_id})
-        for entry in entries
-    ]
-
-    if entries:
-        return entries
-    return None
+    add_record_context(entries, context)
+    return entries
 
 
-def process_rsem(path: str, trial_id: str, assay_id: str, record_id: str) -> dict:
+def process_rsem(path: str, context: RecordContext) -> dict:
     """
     Processes an rsem type table.
 
     Arguments:
         path {str} -- Path to file.
-        trial_id {str} -- Trial ID that file belongs to.
-        assay_id {str} -- Assay ID that file belongs to.
-        record_id {str} -- Mongo ID of the parent file.
-        sample_id {str} -- Sample ID that run was performed on.
+        context {RecordContext} -- Context object containing assay/trial/parentID.
 
     Raises:
         IndexError -- [description]
@@ -200,14 +204,8 @@ def process_rsem(path: str, trial_id: str, assay_id: str, record_id: str) -> dic
                     )
                 )
 
-    [
-        entry.update({"trial": trial_id, "assay": assay_id, "record_id": record_id})
-        for entry in entries
-    ]
-
-    if entries:
-        return entries
-    return None
+    add_record_context(entries, context)
+    return entries
 
 
 # This is a dictionary of all the currently supported filetypes for storage in
@@ -231,7 +229,124 @@ PROC = {
     "rsem_expression": {"re": r"_expression.genes$", "func": process_rsem},
     "rsem_isoforms": {"re": r"_expression.isoforms$", "func": process_table},
     "olink": {"re": r"olink.*npx", "func": process_olink_npx},
+    "olink_meta": {"re": r"olink.*biorepository", "func": process_clinical_metadata},
 }
+
+
+def log_record_upload(records: List[dict], endpoint: str) -> None:
+    """
+    Takes a list of records, and the endpoint they are being sent to, and logs the fact that
+    they were uploaded.
+
+    Arguments:
+        records {List[dict]} -- List of mongo records.
+        endpoint {str} -- API endpoint they are sent to.
+
+    Returns:
+        None -- [description]
+    """
+    for record in records:
+        log = "Record: %s added to collection: %s on trial: %s on assay: %s" % (
+            record["file_name"] if "file_name" in record else " ",
+            endpoint,
+            record["trial"],
+            record["assay"],
+        )
+        logging.info({"message": log, "category": "FAIR-CELERY-RECORD"})
+
+
+def report_validation_issues(response: dict, records: List[dict]) -> List[dict]:
+    """[summary]
+
+    Arguments:
+        response {dict} -- [description]
+        records {List[dict]} -- [description]
+
+    Returns:
+        List[dict] -- [description]
+    """
+    invalid_records = (
+        response.json()["_items"] if "_items" in response.json() else [response.json()]
+    )
+    new_upload = []
+    for validation_error, record in zip(invalid_records, records):
+        if "validation_errors" in record:
+            record["validation_errors"].append(
+                mk_error(
+                    "Record failed datatype validation: %s"
+                    % json.dumps(validation_error["_issues"]),
+                    affected_paths=[],
+                )
+            )
+            new_upload.append(
+                {
+                    "assay": record["assay"],
+                    "trial": record["trial"],
+                    "record_id": record["record_id"],
+                    "validation_errors": record["validation_errors"],
+                }
+            )
+    return new_upload
+
+
+def update_child_list(record_response: dict, endpoint: str, parent_id: str) -> dict:
+    """
+    Adds item to parent record's child list.
+
+    Arguments:
+        record {dict} -- [description]
+        endpoint {str} -- [description]
+
+    Returns:
+        dict -- [description]
+    """
+    fetcher = SmartFetch(EVE_URL)
+    query = {"_id": parent_id}
+
+    records = None
+    if "_items" in record_response:
+        records = record_response["_items"]
+    else:
+        records = [record_response]
+
+    new_children = []
+    for record in records:
+        new_children.append({"_id": record["_id"], "resource": endpoint})
+
+    try:
+        # Get etag of parent.
+        parent = fetcher.get(
+            endpoint="data?where=%s" % json.dumps(query),
+            token=process_file.token["access_token"],
+        ).json()
+
+        # Update parent record.
+        res = requests.post(
+            EVE_URL + "/data_edit/%s" % str(parent["_items"][0]["_id"]),
+            json={"children": parent["_items"][0]["children"] + new_children},
+            headers={
+                "If-Match": parent["_items"][0]["_etag"],
+                "Authorization": "Bearer {}".format(process_file.token["access_token"]),
+                "X-HTTP-Method-Override": "PATCH",
+            },
+        )
+        if not res.status_code == 200:
+            raise RuntimeError
+
+        return res
+    except RuntimeError:
+        if parent.status_code != 200:
+            logging.error(
+                {"message": "Error fetching parent", "category": "ERROR-CELERY-GET"}
+            )
+        if res and res.status_code != 200:
+            logging.error(
+                {
+                    "message": "Error updating child list of parent",
+                    "category": "ERROR-CELERY-PATCH-FAIR",
+                }
+            )
+        return None
 
 
 @APP.task(base=AuthorizedTask)
@@ -245,65 +360,92 @@ def process_file(rec: dict, pro: str) -> bool:
         corresponds to.
 
     Returns:
-        boolean -- Status of the operation.
+        boolean -- True if completed without error, else false.
     """
     eve_fetcher = SmartFetch(EVE_URL)
     temp_file_name = str(uuid4())
     gs_args = ["gsutil", "cp", rec["gs_uri"], temp_file_name]
     subprocess.run(gs_args)
-    res = None
+    records = None
+    response = None
+
     try:
         # Use a random filename as tasks are executing in parallel.
         records = PROC[pro]["func"](
-            temp_file_name, rec["trial"]["$oid"], rec["assay"]["$oid"], rec["_id"]["$oid"]
+            temp_file_name,
+            RecordContext(
+                rec["trial"]["$oid"], rec["assay"]["$oid"], rec["_id"]["$oid"]
+            ),
         )
         remove(temp_file_name)
     except OSError:
-        # If for some reason the file was deleted before this attempt to delete it, just pass.
         pass
 
     try:
-        res = eve_fetcher.post(
+        # First try a normal upload
+        response = eve_fetcher.post(
             endpoint=pro,
             token=process_file.token["access_token"],
             code=201,
             json=records,
         )
-        if isinstance(records, (list,)):
-            for record in records:
-                log = (
-                    "Record: "
-                    + record["file_name"]
-                    + " added to collection: "
-                    + pro
-                    + " on trial: "
-                    + record["trial"]["$oid"]
-                    + " on assay "
-                    + record["assay"]["$oid"]
-                )
-                logging.info({"message": log, "category": "FAIR-CELERY-RECORD"})
-            return True
-        log = (
-            "Record: "
-            + records["file_name"]
-            + " added to collection: "
-            + pro
-            + " on trial: "
-            + records["trial"]["$oid"]
-            + " on assay "
-            + records["assay"]["$oid"]
-        )
-        logging.info({"message": log, "category": "FAIR-CELERY-RECORD"})
+
+        update_child_list(response.json(), pro, rec["_id"]["$oid"])
+
+        # Simplify handling later
+        if not isinstance(records, (list,)):
+            records = [records]
+
+        # Record uploads.
+        log_record_upload(records, pro)
         return True
     except RuntimeError:
-        logging.error(
-            {
-                "message": "Biomarker upload failed",
-                "category": "ERROR-CELERY-PROCESSING",
-            },
-            exc_info=True,
-        )
-        return False
+        # Catch unexpected error codes.
+        if not response.status_code == 422:
+            logging.error(
+                {
+                    "message": "Upload failed for reasons other than validation.",
+                    "category": "ERROR-CELERY-UPLOAD",
+                }
+            )
+            return False
+
+        # Extract Cerberus errors from response.
+        new_upload = report_validation_issues(response, records)
+        if not new_upload:
+            # Handle data types that haven't used the new schema yet.
+            logging.warning(
+                {
+                    "message": (
+                        "Validation error detected in upload, but schema not adapted to"
+                        "handle error reports"
+                    ),
+                    "category": "WARNING-CELERY-UPLOAD",
+                }
+            )
+            return False
+        try:
+            # Try to upload just the errors.
+            errors = eve_fetcher.post(
+                endpoint=pro,
+                token=process_file.token["access_token"],
+                code=201,
+                json=new_upload,
+            )
+
+            # Still update parent to tie to error documents.
+            update_child_list(errors.json(), pro, rec["_id"]["$oid"])
+
+            log_record_upload(new_upload, pro)
+        except RuntimeError:
+            # If that fails, something on my end is wrong.
+            logging.error(
+                {
+                    "message": "Total failure of biomarker upload.",
+                    "category": "ERROR-CELERY-UPLOAD",
+                }
+            )
+            return False
 
 
 @APP.task
@@ -313,10 +455,7 @@ def postprocessing(records: List[dict]) -> None:
     If so, they are processed and then uploaded to mongo.
 
     Arguments:
-        records {List[dict]} -- [description]
-
-    Returns:
-        None -- [description]
+        records {List[dict]} -- List of records slated for processing.
     """
     tasks = []
 
@@ -330,14 +469,7 @@ def postprocessing(records: List[dict]) -> None:
                 # If a match is found, add to job queue
                 tasks.append(process_file.s(rec, pro))
 
-    job = None
-    # Grouping is slightly different depending on length of array.
-    if len(tasks) == 1:
-        job = group(tasks)
-    else:
-        job = group(*tasks)
-
-    # Start all jobs in parallel
+    job = group(tasks) if len(tasks) == 1 else group(*tasks)
     result = job.apply_async()
 
     for task in tasks:
@@ -357,4 +489,3 @@ def postprocessing(records: List[dict]) -> None:
                 "category": "ERROR-CELERY-PROCESSING",
             }
         )
-

@@ -4,16 +4,18 @@ Simple celery example
 """
 import datetime
 import json
+import logging
 import re
 import time
-import logging
 from typing import List, Tuple
-from cidc_utils.requests import SmartFetch
+
 import requests
-from framework.tasks.AuthorizedTask import AuthorizedTask
+from cidc_utils.requests import SmartFetch
+
 from framework.celery.celery import APP
-from framework.tasks.cromwell_tasks import manage_bucket_acl, get_collabs
-from framework.tasks.variables import EVE_URL, CROMWELL_URL
+from framework.tasks.AuthorizedTask import AuthorizedTask
+from framework.tasks.cromwell_tasks import get_collabs, manage_bucket_acl
+from framework.tasks.variables import CROMWELL_URL, EVE_URL
 
 EVE_FETCHER = SmartFetch(EVE_URL)
 CROMWELL_FETCHER = SmartFetch(CROMWELL_URL)
@@ -32,47 +34,41 @@ def get_run_log(run_id: str) -> dict:
     Returns:
         dict -- Log data.
     """
-    endpoint = run_id + '/logs'
+    endpoint = run_id + "/logs"
     log_data = CROMWELL_FETCHER.get(endpoint=endpoint).json()
     return json.dumps(log_data)
 
 
-def add_meta_item(
-        record: dict, key: str, value: object, emails: List[str]) -> Tuple[dict, dict]:
-    """Packages items from a cromwell output for addition to the Mongo database.
+def add_meta_item(analysis_info: dict, entry: dict) -> dict:
+    """
+    Packages cromwell output into a mongo entry
 
     Arguments:
-        record {[type]} -- [description]
-        key {[type]} -- [description]
-        value {[type]} -- [description]
-        emails {[type]} -- [description]
+        analysis_info {dict} -- Dictionary containing run information, specifically emails and
+            data records.
+        entry {dict} -- Key-value pair.
 
     Returns:
-        dict, dict -- Tuple of filegen entry and data upload entry.
+        dict -- [description]
     """
-    manage_bucket_acl('lloyd-test-pipeline', value, emails)
+    record = analysis_info["record"]
+    (key, value), = entry.items()
+    manage_bucket_acl("lloyd-test-pipeline", value, analysis_info["emails"])
+
     return {
-        'file_name': key,
-        'gs_uri': value
-    }, {
-        'file_name': key,
-        'gs_uri': value,
-        'sample_id': record['samples'][0],
-        'trial': record['trial'],
-        'assay': record['assay'],
-        'analysis_id': record['analysis_id'],
-        'date_created': str(datetime.datetime.utcnow().isoformat()),
-        'mapping': key.split(".", 1)[1]
+        "file_name": key,
+        "gs_uri": value,
+        "sample_id": record["samples"][0],
+        "trial": record["trial"],
+        "assay": record["assay"],
+        "analysis_id": record["analysis_id"],
+        "date_created": str(datetime.datetime.utcnow().isoformat()),
+        "mapping": key.split(".", 1)[1],
     }
 
 
 def meta_parse(
-        record: dict,
-        parent_key: str,
-        item: object,
-        data_to_upload: dict,
-        filegen: dict,
-        emails: List[str]
+    analysis_info: dict, parent_key: str, item: object, filegen: List[dict]
 ) -> None:
     """
     Takes a metadata output JSON from a cromwell run, and returns a list of records
@@ -80,114 +76,83 @@ def meta_parse(
     Also updates the access control lists of the objects affected.
 
     Arguments:
-        record {dict} -- The output.json record.
+        analysis_info {dict} -- Run information.
         parent_key {str} -- Key under which the entry is listed.
         item {object} -- The output json value being processed.
-        data_to_upload {dict} -- Dictionary of data that needs to be uploaded.
-        filegen {dict} -- List of files being handled.
-        emails {[str]} -- List of emails of project collaborators.
+        filegen {List[dict]} -- List of files being handled.
     """
     if isinstance(item, str):
-        fil, dat = add_meta_item(
-            record,
-            parent_key,
-            item,
-            emails
-        )
+        fil = add_meta_item(analysis_info, {parent_key: item})
         filegen.append(fil)
-        data_to_upload.append(dat)
     elif isinstance(item, list):
         for sub_item in item:
-            meta_parse(
-                record,
-                parent_key,
-                sub_item,
-                data_to_upload,
-                filegen,
-                emails
-            )
+            meta_parse(analysis_info, parent_key, sub_item, filegen)
     elif isinstance(item, dict):
         for key, value in item.items():
-            meta_parse(
-                record,
-                key,
-                value,
-                data_to_upload,
-                filegen,
-                emails
-            )
+            meta_parse(analysis_info, key, value, filegen)
 
 
-def create_analysis_entry(
-        record: dict, run_id: str, status: bool, _etag: str, token: str, emails: List[str]
-) -> dict:
+def create_analysis_entry(analysis_info: dict, _etag: str, token: str) -> dict:
     """
     Updates the analysis entry with the information from the completed run.
 
     Arguments:
-        record {dict} -- Contextual information about the run.
-        run_id {str} -- Id of the run on Cromwell Server
-        status {bool} -- Whether the run completed or aborted.
+        analysis_info {dict} -- Information on the run.
         _etag {str} -- Etag value for patching.
         token {str} -- Access token.
-        emails: {[str]} -- List of collaborators on the trial.
 
     Returns:
         dict -- response data from the API.
     """
     payload_object = {
-        'files_generated': [],
-        'status': {
-            'progress': "Completed" if status else "Aborted",
-            'message': ''
-        }
+        "files_generated": [],
+        "status": {
+            "progress": "Completed" if analysis_info["status"] else "Aborted",
+            "message": "",
+        },
     }
 
     # If run failed, append logs to record.
-    if not status:
-        payload_object['status']['message'] = get_run_log(run_id)
+    if not analysis_info["status"]:
+        payload_object["status"]["message"] = get_run_log(analysis_info["run_id"])
 
-    metadata = CROMWELL_FETCHER.get(endpoint=run_id + '/metadata').json()
-    filegen = payload_object['files_generated']
-    data_to_upload = []
+    metadata = CROMWELL_FETCHER.get(
+        endpoint=analysis_info["run_id"] + "/metadata"
+    ).json()
+    filegen = payload_object["files_generated"]
 
     # Parse file string to JSON
     string_meta = json.dumps(metadata)
-    payload_object['metadata_blob'] = string_meta
+    payload_object["metadata_blob"] = string_meta
 
-    pattern = re.compile(r'gs://')
-    for key, value in metadata['outputs'].items():
+    pattern = re.compile(r"gs://")
+    for key, value in metadata["outputs"].items():
         if re.search(pattern, str(value)):
-            meta_parse(
-                record,
-                key,
-                value,
-                data_to_upload,
-                filegen,
-                emails
-            )
+            meta_parse(analysis_info, key, value, filegen)
 
     # Insert the analysis object
     patch_res = requests.patch(
-        EVE_URL + "/analysis/" + record['analysis_id'],
+        EVE_URL + "/analysis/" + analysis_info["record"]["analysis_id"],
         json=payload_object,
-        headers={
-            "If-Match": _etag,
-            "Authorization": 'Bearer {}'.format(token)
-        }
+        headers={"If-Match": _etag, "Authorization": "Bearer {}".format(token)},
     )
 
     if not patch_res.status_code == 200:
-        log = "Error communicating with eve: " + patch_res.reason
-        logging.error({
-            'message': log,
-            'category': 'ERROR-CELERY'
-        })
+        log = "Error communicating with eve: %s" % patch_res.reason
+        logging.error({"message": log, "category": "ERROR-CELERY"})
         raise RuntimeError
 
     # Insert data
-    if data_to_upload:
-        return EVE_FETCHER.post(token=token, endpoint='data', json=data_to_upload, code=201)
+    if filegen:
+        return EVE_FETCHER.post(
+            token=token,
+            endpoint="data",
+            json=[
+                {"file_name": entry["file_name"], "gs_uri": entry["gs_uri"]}
+                for entry in filegen
+            ],
+            code=201,
+        )
     return None
 
 
@@ -224,63 +189,57 @@ def check_for_runs() -> Tuple[requests.Response, requests.Response]:
             wdl_location: "..."
         }]
     """
-    assay_projection = {
-        'non_static_inputs': 1,
-        'static_inputs': 1,
-        'wdl_location': 1
-    }
+    assay_projection = {"non_static_inputs": 1, "static_inputs": 1, "wdl_location": 1}
 
     # Filter out any assay that does not have a wdl associated with it.
-    pipeline_filter = {
-        'wdl_location': {
-            '$ne': 'null'
-        }
-    }
+    pipeline_filter = {"wdl_location": {"$ne": "null"}}
 
     assay_query_string = "assays?where=%s&projection=%s" % (
-        json.dumps(pipeline_filter), json.dumps(assay_projection))
+        json.dumps(pipeline_filter),
+        json.dumps(assay_projection),
+    )
 
     # Contains a list of all the running assays and their inputs
     assay_response = EVE_FETCHER.get(
-        token=analysis_pipeline.token['access_token'], endpoint=assay_query_string, code=200
-    ).json()['_items']
+        token=analysis_pipeline.token["access_token"],
+        endpoint=assay_query_string,
+        code=200,
+    ).json()["_items"]
 
     # Creates a list of all sought mappings to find user-defined inputs
     sought_mappings = [
-        item for sublist in [x['non_static_inputs'] for x in assay_response] for item in sublist
+        item
+        for sublist in [x["non_static_inputs"] for x in assay_response]
+        for item in sublist
     ]
 
     # For stage N > 2 pipelines, the inputs need to be computed from the trailing file names
     # of the outputs, so the string must be parsed to cut off the run name unlike the
     # user-uploaded files which can be matched against the whole name.
     input_names = [
-        item.split(".", 1)[1] for sublist in [x['non_static_inputs'] for x in assay_response]
+        item.split(".", 1)[1] if len(item.split(".", 1)) == 2 else item
+        for sublist in [x["non_static_inputs"] for x in assay_response]
         for item in sublist
     ]
 
     # Query the data and organize it into groupings
     # Add together the mapping and input names as a search
     # The data are grouped into unique groups via trial/assay/sample_id
-    aggregate_query = {
-        '$inputs': sought_mappings + input_names,
-    }
+    aggregate_query = {"$inputs": sought_mappings + input_names}
 
     query_string = "data/query?aggregate=%s" % (json.dumps(aggregate_query))
-    record_response = EVE_FETCHER.get(
-        token=analysis_pipeline.token['access_token'], endpoint=query_string)
 
-    if not record_response.status_code == 200:
-        error_msg = (
-            'Failed to fetch record: ' +
-            record_response.reason + ': ' + record_response.status_code
+    try:
+        record_response = EVE_FETCHER.get(
+            token=analysis_pipeline.token["access_token"], endpoint=query_string
         )
-        logging.error({
-            'message': error_msg,
-            'category': 'ERROR-CELERY-QUERY'
-        })
-        raise RuntimeError('Failed to fetch records')
-
-    return record_response, assay_response
+        return record_response, assay_response
+    except RuntimeError:
+        error_msg = "Failed to fetch record: %s. %s" % (
+            record_response.reason,
+            record_response.status_code,
+        )
+        logging.error({"message": error_msg, "category": "ERROR-CELERY-QUERY"})
 
 
 def create_input_json(sample_assay: dict, assay: dict) -> dict:
@@ -312,29 +271,26 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
     input_dictionary = {}
 
     # Get SampleID of run.
-    sample_id = sample_assay['_id']['sample_id']
+    sample_id = sample_assay["_id"]["sample_id"]
 
-    run_prefix = assay['static_inputs'][0]['key_name'].split('.')[0]
+    run_prefix = assay["static_inputs"][0]["key_name"].split(".")[0]
     # Map inputs to make inputs.json file
-    for entry in assay['static_inputs']:
+    for entry in assay["static_inputs"]:
 
         # Set the prefix using the sample ID.
-        if re.search(r'.prefix$', entry["key_name"]):
-            input_dictionary[entry['key_name']] = sample_id
+        if re.search(r".prefix$", entry["key_name"]):
+            input_dictionary[entry["key_name"]] = sample_id
         else:
-            input_dictionary[entry['key_name']] = entry['key_value']
+            input_dictionary[entry["key_name"]] = entry["key_value"]
 
-    for record in sample_assay['records']:
-        if not re.search(run_prefix, record['mapping']):
-            input_dictionary[run_prefix + '.' + record['mapping']] = record['gs_uri']
+    for record in sample_assay["records"]:
+        if not re.search(run_prefix, record["mapping"]):
+            input_dictionary[run_prefix + "." + record["mapping"]] = record["gs_uri"]
         else:
-            input_dictionary[record['mapping']] = record['gs_uri']
+            input_dictionary[record["mapping"]] = record["gs_uri"]
 
     input_message = "Input Dictionary Created: \n" + json.dumps(input_dictionary)
-    logging.info({
-        'message': input_message,
-        'category': 'INFO-CELERY-DEBUG'
-    })
+    logging.info({"message": input_message, "category": "INFO-CELERY-DEBUG"})
     return input_dictionary
 
 
@@ -353,16 +309,14 @@ def set_record_processed(records: List[dict], condition: bool) -> bool:
     patch_status = []
     for record in records:
         patch_res = requests.patch(
-            EVE_URL + "/data/" + record['_id'],
-            json={
-                'processed': condition
-            },
+            EVE_URL + "/data/" + record["_id"],
+            json={"processed": condition},
             headers={
-                "If-Match": record['_etag'],
-                "Authorization": 'Bearer {}'.format(
-                    analysis_pipeline.token['access_token']
-                )
-            }
+                "If-Match": record["_etag"],
+                "Authorization": "Bearer {}".format(
+                    analysis_pipeline.token["access_token"]
+                ),
+            },
         )
         patch_status.append(patch_res.status_code == 200)
 
@@ -379,17 +333,15 @@ def check_processed(records: List[dict]) -> Tuple[List[dict], bool]:
     Returns:
         Tuple -- Returns record ids and whether they are all processed or not.
     """
-    record_ids = [x['_id'] for x in records]
+    record_ids = [x["_id"] for x in records]
     query_expr = {"_id": {"$in": record_ids}}
     response = EVE_FETCHER.get(
-        token=analysis_pipeline.token['access_token'],
-        endpoint='data?where=%s' % (
-            json.dumps(query_expr)
-        )
-    ).json()['_items']
+        token=analysis_pipeline.token["access_token"],
+        endpoint="data?where=%s" % (json.dumps(query_expr)),
+    ).json()["_items"]
 
     # Check if all records are unprocessed.
-    all_free = all(x['processed'] is False for x in response)
+    all_free = all(x["processed"] is False for x in response)
     return response, all_free
 
 
@@ -412,80 +364,81 @@ def start_cromwell_flows(assay_response: List[dict], groups: List[dict]):
     for assay in assay_response:
 
         # Get list of trials that include the assay.
-        query = {'assays.assay_id': assay['_id']}
+        query = {"assays.assay_id": assay["_id"]}
         trials = EVE_FETCHER.get(
             endpoint="trials?where=%s" % (json.dumps(query)),
-            token=analysis_pipeline.token['access_token'],
-            code=200
-            ).json()['_items']
+            token=analysis_pipeline.token["access_token"],
+            code=200,
+        ).json()["_items"]
 
         # Make array of IDs
-        trial_ids = [x['_id'] for x in trials]
+        trial_ids = [x["_id"] for x in trials]
 
         # Make sure that the trial the data belongs to includes the assay about to be run.
         for sample_assay in groups:
-            if sample_assay['_id']['trial'] in trial_ids \
-                    and len(sample_assay['records']) == len(assay['non_static_inputs']):
-
-                assay_id = assay['_id']
-                trial_id = sample_assay['_id']['trial']
-                sample_id = sample_assay['_id']['sample_id']
+            if sample_assay["_id"]["trial"] in trial_ids and len(
+                sample_assay["records"]
+            ) == len(assay["non_static_inputs"]):
+                if not "sample_id" in sample_assay["_id"]:
+                    continue
 
                 payload = {
-                    'trial': str(trial_id),
-                    'assay': str(assay_id),
-                    'samples': [str(sample_id)]
+                    "trial": str(sample_assay["_id"]["trial"]),
+                    "assay": str(assay["_id"]),
+                    "samples": [str(sample_assay["_id"]["sample_id"])],
                 }
 
                 # Query all records to make sure not processed
-                records = sample_assay['records']
+                records = sample_assay["records"]
                 record_ids, all_free = check_processed(records)
 
                 if not all_free:
-                    message = 'Record involved in run has already been used' + str(
-                        sample_assay['_id']['trial'])
-                    logging.warning({
-                        'message': message,
-                        'category': 'WARNING-CELERY-PIPELINES'
-                    })
+                    message = "Record involved in run has already been used" + str(
+                        sample_assay["_id"]["trial"]
+                    )
+                    logging.warning(
+                        {"message": message, "category": "WARNING-CELERY-PIPELINES"}
+                    )
                     set_record_processed(record_ids, False)
                     return []
 
                 # Patch all to ensure atomicity
-                status = set_record_processed(record_ids, True)
-
-                if not status:
+                if not set_record_processed(record_ids, True):
                     message = "Patch operation failed! Aborting!" + str(
-                        sample_assay['_id']['trial'])
-                    logging.error({
-                        'message': message,
-                        'category': 'ERROR-CELERY-PIPELINE'
-                    })
+                        sample_assay["_id"]["trial"]
+                    )
+                    logging.error(
+                        {"message": message, "category": "ERROR-CELERY-PIPELINE"}
+                    )
                     set_record_processed(record_ids, False)
                     return []
 
                 # Create analysis entry.
                 res_json = EVE_FETCHER.post(
-                    token=analysis_pipeline.token['access_token'],
-                    endpoint='analysis',
+                    token=analysis_pipeline.token["access_token"],
+                    endpoint="analysis",
                     json=payload,
-                    code=201
+                    code=201,
                 ).json()
-                payload['analysis_id'] = res_json['_id']
+                payload["analysis_id"] = res_json["_id"]
 
                 # Create inputs.json file.
                 files = {
-                    'workflowSource': open(assay['wdl_location'], 'rb'),
-                    'workflowInputs': json.dumps(
+                    "workflowSource": open(assay["wdl_location"], "rb"),
+                    "workflowInputs": json.dumps(
                         create_input_json(sample_assay, assay)
-                    ).encode('utf-8')
+                    ).encode("utf-8"),
                 }
 
-                response_arr.append({
-                    'api_response': CROMWELL_FETCHER.post(code=201, files=files).json(),
-                    'analysis_etag': res_json['_etag'],
-                    'record': payload
-                })
+                response_arr.append(
+                    {
+                        "api_response": CROMWELL_FETCHER.post(
+                            code=201, files=files
+                        ).json(),
+                        "analysis_etag": res_json["_etag"],
+                        "record": payload,
+                    }
+                )
 
     return response_arr
 
@@ -499,41 +452,43 @@ def analysis_pipeline():
     record_response, assay_response = check_for_runs()
 
     # If they are, send them to cromwell to start.
-    active_runs = start_cromwell_flows(assay_response, record_response.json()['_items'])
+    active_runs = start_cromwell_flows(assay_response, record_response.json()["_items"])
 
     # Poll for active runs until completed.
     while active_runs:
         time.sleep(5)
-        message = str(len(active_runs)) + ' runs still active...'
-        logging.info({
-            'message': message,
-            'category': 'DEBUG-CELERY'
-        })
+        message = str(len(active_runs)) + " runs still active..."
+        logging.info({"message": message, "category": "DEBUG-CELERY"})
         filter_runs = []
 
         for run in active_runs:
-            run_id = run['api_response']['id']
-            record = run['record']
+            run_id = run["api_response"]["id"]
+            record = run["record"]
 
             # Poll status.
-            endpoint = run_id + '/' + 'status'
-            response = CROMWELL_FETCHER.get(
-                endpoint=endpoint, code=200).json()['status']
+            endpoint = run_id + "/" + "status"
+            response = CROMWELL_FETCHER.get(endpoint=endpoint, code=200).json()[
+                "status"
+            ]
 
             # If run has finished, make a record.
-            if response not in ['Submitted', 'Running']:
+            if response not in ["Submitted", "Running"]:
 
                 # Fetch collaborators to control access.
-                collabs = get_collabs(record['trial'], analysis_pipeline.token['access_token'])
-                emails = collabs.json()['_items'][0]['collaborators']
+                collabs = get_collabs(
+                    record["trial"], analysis_pipeline.token["access_token"]
+                )
+                emails = collabs.json()["_items"][0]["collaborators"]
 
                 create_analysis_entry(
-                    record,
-                    run_id,
-                    response == 'Succeeded',
-                    run['analysis_etag'],
-                    analysis_pipeline.token['access_token'],
-                    emails
+                    {
+                        "record": record,
+                        "run_id": run_id,
+                        "status": response == "Succeeded",
+                        "_etag": run["analysis_etag"],
+                    },
+                    analysis_pipeline.token["access_token"],
+                    emails,
                 )
                 # Add run to filter list.
                 filter_runs.append(run)

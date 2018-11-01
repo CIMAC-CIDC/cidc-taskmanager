@@ -32,10 +32,11 @@ def get_token() -> dict:
 
 
 def get_management_token() -> dict:
-    """[summary]
+    """
+    Gets a token for contacting the management endpoint of auth0.
 
     Returns:
-        dict -- [description]
+        dict -- Dictionary with token and expirey information.
     """
     payload = {
         'grant_type': 'client_credentials',
