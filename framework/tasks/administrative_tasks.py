@@ -36,7 +36,7 @@ def get_user_trials(user_email: str, token: str) -> List[dict]:
         token {str} -- JWT for API access.
 
     Returns:
-        [type] -- [description]
+        List[dict] -- List of trials user is a collaborator on.
     """
     collabs = {"collaborators": user_email}
     projection = {"_id": 1}
@@ -47,80 +47,114 @@ def get_user_trials(user_email: str, token: str) -> List[dict]:
     return EVE_FETCHER.get(token=token, endpoint=query).json()["_items"]
 
 
-def get_user_records(matched_trials: List[dict], token: str) -> List[str]:
+def get_user_records(permissions: List[dict], token: str) -> List[str]:
     """
-    Gets a list of the GCS paths for all objects the user is authorized tos ee.
+    Gets all of the data objects the user might have permission to see.
 
     Arguments:
-        matched_trials {List[dict]} -- List of objects specifying trial ids and etags.
-        token {str} -- API access token.
+        permissions {List[dict]} -- List of permissions for a user.
+        token {str} -- Access token.
 
     Returns:
-        List[str] -- List of GCS paths.
+        List[str] -- List of google URIs
     """
-    trial_ids = [trial["_id"] for trial in matched_trials]
-    condition = {"trial": {"$in": trial_ids}}
-    proj = {"gs_uri": 1}
-    data_query = "data?where=%s&projection=%s" % (
-        json.dumps(condition),
-        json.dumps(proj),
-    )
-    records = EVE_FETCHER.get(token=token, endpoint=data_query).json()["_items"]
+    trial_access = []
+    assay_access = []
+    conditions = {"$or": []}
+    for perm in permissions:
+        if perm["role"] in ["trial_r", "trial_w"]:
+            trial_access.append(perm["trial"])
+            conditions["$or"].append({"trial": perm["trial"]})
+        if perm["role"] in ["assay_r", "assay_w"]:
+            assay_access.append({"assay": perm["assay"]})
+            conditions["$or"].append(perm["assay"])
+
+    for perm in permissions:
+        if perm["trial"] not in trial_access and perm["assay"] not in assay_access:
+            conditions["or"].append({"trial": perm["trial"], "assay": perm["assay"]})
+
+    query = "data?where=%s" % json.dumps(conditions)
+    records = EVE_FETCHER.get(token=token, endpoint=query).json()["items"]
     return [records["gs_uri"] for record in records]
 
 
-def deactive_account(user_email: str, token: str) -> None:
+def clear_permissions(user_id: str, token: str) -> None:
+    """
+    Clears the permissions list for a given user.
+
+    Arguments:
+        user_id {str} -- ID of user to be cleared.
+        token {str} -- Access token.
+
+    Returns:
+        None -- [description]
+    """
+    query = "accounts/%s" % user_id
+    user_etag = EVE_FETCHER.get(endpoint=query, token=token)["_etag"]
+    update = {"permissions": []}
+    try:
+        EVE_FETCHER.patch(
+            endpoint="accounts", _etag=user_etag, token=token, json=update
+        )
+    except RuntimeError:
+        log = "Error attempting to clear permissions for user %s" % user_id
+        logging.error({"message": log, "category": "ERROR-CELERY-USER-FAIR"})
+
+
+def deactivate_account(user: dict, token: str) -> None:
     """
     Remove all data access from the supplied account.
 
     Arguments:
-        user_email {str} -- Registered email of user to be deactivated.
+        user {dict} -- user record containing id, email, last access.
         token {str} -- Eve access token.
     """
     # Get all trials where user is a collaborator.
-    matched_trials = get_user_trials(user_email, token)
+    matched_trials = get_user_trials(user["email"], token)
 
     # Update all of those trials to remove the individual.
-    update = {"$pull": {"collaborators": user_email}}
+    update = {"$pull": {"collaborators": user["email"]}}
     for trial in matched_trials:
-        url = "trials/" + trial["_id"]
-        headers = {"If-Match": trial["_etag"]}
-        EVE_FETCHER.patch(endpoint=url, token=token, headers=headers, json=update)
-        per_log = (
-            "User: "
-            + user_email
-            + " removed as collaborator from trial: "
-            + trial["_id"]
-        )
-        logging.info({"message": per_log, "category": "FAIR-CELERY-PERMISSIONS"})
+        try:
+            EVE_FETCHER.patch(
+                endpoint="trials", item_id=trial["_id"], token=token, json=update
+            )
+            per_log = "User: %s removed as collaborator from trial: %s" % (
+                user["email"],
+                trial["_id"],
+            )
+            logging.info({"message": per_log, "category": "FAIR-CELERY-PERMISSIONS"})
+        except RuntimeError:
+            per_log = "Error trying to delete %s from collaborators for trial %s" % (
+                user["email"],
+                trial["_id"],
+            )
+            logging.error({"message": per_log, "category": "ERROR-CELERY-ACCOUNTS"})
 
     # Get list of records person is likely to be authorized on.
-    gs_uri_list = get_user_records(matched_trials, token)
+    gs_uri_list = get_user_records(user["permissions"], token)
 
     # Remove their read and write access to records. Note they likely never had write.
     # But write is revoked anyway as a precaution.
-    revoke_access(GOOGLE_BUCKET_NAME, gs_uri_list, [user_email])
+    revoke_access(GOOGLE_BUCKET_NAME, gs_uri_list, [user["email"]])
+
+    # Clear all permissions
+    clear_permissions(user["_id"], token)
 
 
-def delete_user_account(user_email: str, token: str) -> None:
+def delete_user_account(user: dict, token: str) -> None:
     """
     Delete a user account from the accounts collections.
 
     Arguments:
-        user_email {str} -- User's registered email.
+        user {dict} -- User object.
         token {str} -- API access token.
     """
-    cond = {"email": user_email}
-    projection = {"_id": 1}
-    query = "accounts?where=%s&projection=%s" % (
-        json.dumps(cond),
-        json.dumps(projection),
-    )
-    user = EVE_FETCHER.get(endpoint=query, token=token).json()["_items"][0]
-    url = "accounts/" + user["_id"]
-    headers = {"If-Match": user["_etag"]}
+    url = "accounts/%s" % user["_id"]
+    user_record = EVE_FETCHER.get(endpoint=url, token=token).json()
+    headers = {"If-Match": user_record["_etag"]}
     EVE_FETCHER.delete(endpoint=url, token=token, headers=headers)
-    log = "Deleted user account: " + user_email
+    log = "Deleted user account: %s" % user["email"]
     logging.info({"message": log, "category": "FAIR-CELERY-ACCOUNTS"})
 
 
@@ -156,10 +190,8 @@ def check_last_login() -> None:
     Function that scans the user collection for inactive accounts and deletes any if found.
     """
     # Get list of accounts and their last logins.
-    projection = {"last_access": 1, "email": 1}
-    query = "accounts?projection=%s" % (json.dumps(projection))
     user_results = EVE_FETCHER.get(
-        token=check_last_login.token["access_token"], endpoint=query
+        token=check_last_login.token["access_token"], endpoint="accounts"
     ).json()["_items"]
 
     # Define relevant time periods and get current time.
@@ -169,10 +201,9 @@ def check_last_login() -> None:
 
     # Deactive any accounts inactive for a month, delete any inactive for a year.
     for user in user_results:
-        print(user)
         last_l = parse(user["last_access"])
         if current_t - last_l > month:
-            deactive_account(user, check_last_login.token["access_token"])
+            deactivate_account(user, check_last_login.token["access_token"])
         elif current_t - last_l > year:
             delete_user_account(user, check_last_login.token["access_token"])
 
@@ -249,24 +280,32 @@ def poll_auth0_logs() -> None:
     logging.info({"message": log, "category": "FAIR-CELERY-LOGGING"})
 
 
-def get_collabs(trial_id: str, token: str) -> dict:
-    """
-    Gets a list of collaborators given a trial ID
+def get_authorized_users(record_info: dict, token: str) -> List[str]:
+    """For a given record, return a list of users who can see it.
 
     Arguments:
-        trial_id {str} -- ID of trial.
-        token {str} -- Access token.
+        record_info {dict} -- Dictionary with trial and assay id
+        token {str} -- access token.
 
     Returns:
-        dict -- Mongo response.
+        List[str] -- List of user emails.
     """
-    trial = {"_id": trial_id}
-    projection = {"collaborators": 1}
-    query = "trials?where=%s&projection=%s" % (
-        json.dumps(trial),
-        json.dumps(projection),
-    )
-    return EVE_FETCHER.get(token=token, endpoint=query)
+    assay = record_info["assay"]
+    trial = record_info["trial"]
+    query = {
+        "$or": [
+            {"permissions": {"trial": trial, "role": "trial_r"}},
+            {"permissions": {"trial": trial, "role": "trial_w"}},
+            {"permissions": {"assay": assay, "role": "assay_r"}},
+            {"permissions": {"assay": assay, "role": "assay_w"}},
+            {"permissions": {"trial": trial, "assay": assay, "role": "read"}},
+            {"permissions": {"trial": trial, "assay": assay, "role": "write"}},
+        ]
+    }
+    authorized_users = EVE_FETCHER.get(
+        "accounts?where=%s" % json.dumps(query), token=token
+    ).json()["_items"]
+    return [user["email"] for user in authorized_users]
 
 
 def change_user_role(user_id: str, token: str, new_role: str, authorizer: str) -> None:
@@ -281,9 +320,8 @@ def change_user_role(user_id: str, token: str, new_role: str, authorizer: str) -
     """
     url = "accounts/" + user_id
     user_doc = EVE_FETCHER.get(endpoint=url, token=token)
-    headers = {"If-Match": user_doc["_etag"]}
     EVE_FETCHER.patch(
-        endpoint=url, token=token, headers=headers, json={"role": new_role}
+        endpoint=url, token=token, _etag=user_doc["_etag"], json={"role": new_role}
     )
     log = "Role change for user: %s from %s to %s authorized by: %s" % (
         user_doc["email"],
