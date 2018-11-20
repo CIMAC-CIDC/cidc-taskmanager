@@ -15,6 +15,7 @@ python-json-logger = "*"
 python-dateutil = "*"
 openpyxl = "*"
 selenium = "*"
+bson = "*"
 
 [dev-packages]
 pylint = "*"

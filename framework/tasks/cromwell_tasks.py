@@ -13,7 +13,7 @@ from cidc_utils.requests import SmartFetch
 from framework.celery.celery import APP
 from framework.tasks.administrative_tasks import manage_bucket_acl, get_authorized_users
 from framework.tasks.AuthorizedTask import AuthorizedTask
-from framework.tasks.variables import EVE_URL, GOOGLE_BUCKET_NAME
+from framework.tasks.variables import EVE_URL, GOOGLE_BUCKET_NAME, GOOGLE_UPLOAD_BUCKET
 
 EVE_FETCHER = SmartFetch(EVE_URL)
 
@@ -55,9 +55,7 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
     files = upload_record["files"]
 
     for record in files:
-
-        # Construct final data URI
-        record["gs_uri"] = (
+        record["gs_uri"] = record["gs_uri"] = (
             google_path
             + record["trial"]["$oid"]
             + "/"
@@ -69,7 +67,7 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
         )
         record["date_created"] = str(datetime.datetime.now().isoformat())
         old_uri = (
-            google_path + "staging/" + staging_id["$oid"] + "/" + record["file_name"]
+            "gs://" + GOOGLE_UPLOAD_BUCKET + "/" + staging_id["$oid"] + "/" + record["file_name"]
         )
 
         # Move file to destination.

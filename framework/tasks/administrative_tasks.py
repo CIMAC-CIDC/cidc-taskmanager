@@ -22,6 +22,7 @@ from framework.tasks.variables import (
     GOOGLE_BUCKET_NAME,
     LOGSTORE,
     MANAGEMENT_API,
+    GOOGLE_UPLOAD_BUCKET
 )
 
 EVE_FETCHER = SmartFetch(EVE_URL)
@@ -56,7 +57,7 @@ def get_user_records(permissions: List[dict], token: str) -> List[str]:
         token {str} -- Access token.
 
     Returns:
-        List[str] -- List of google URIs
+        List[str] -- List of google URIs.
     """
     trial_access = []
     assay_access = []
@@ -114,16 +115,14 @@ def deactivate_account(user: dict, token: str) -> None:
 
     # Update all of those trials to remove the individual.
     update = {"$pull": {"collaborators": user["email"]}}
+    trial_names = []
+
     for trial in matched_trials:
         try:
+            trial_names.append(trial["trial_name"])
             EVE_FETCHER.patch(
                 endpoint="trials", item_id=trial["_id"], token=token, json=update
             )
-            per_log = "User: %s removed as collaborator from trial: %s" % (
-                user["email"],
-                trial["_id"],
-            )
-            logging.info({"message": per_log, "category": "FAIR-CELERY-PERMISSIONS"})
         except RuntimeError:
             per_log = "Error trying to delete %s from collaborators for trial %s" % (
                 user["email"],
@@ -131,15 +130,17 @@ def deactivate_account(user: dict, token: str) -> None:
             )
             logging.error({"message": per_log, "category": "ERROR-CELERY-ACCOUNTS"})
 
+    message = "User: %s removed as a collaborator from the following trials: %s" % (
+        user["email"],
+        ", ".join(trial_names),
+    )
+    logging.info({"message": message, "category": "FAIR-CELERY-PERMISSIONS"})
+
     # Get list of records person is likely to be authorized on.
     gs_uri_list = get_user_records(user["permissions"], token)
-
-    # Remove their read and write access to records. Note they likely never had write.
-    # But write is revoked anyway as a precaution.
     revoke_access(GOOGLE_BUCKET_NAME, gs_uri_list, [user["email"]])
-
-    # Clear all permissions
     clear_permissions(user["_id"], token)
+    change_upload_permission(GOOGLE_UPLOAD_BUCKET, [user], False)
 
 
 def delete_user_account(user: dict, token: str) -> None:
@@ -156,6 +157,24 @@ def delete_user_account(user: dict, token: str) -> None:
     EVE_FETCHER.delete(endpoint=url, token=token, headers=headers)
     log = "Deleted user account: %s" % user["email"]
     logging.info({"message": log, "category": "FAIR-CELERY-ACCOUNTS"})
+    gs_uri_list = get_user_records(user["permissions"], token)
+    revoke_access(GOOGLE_BUCKET_NAME, gs_uri_list, [user["email"]])
+    change_upload_permission(GOOGLE_UPLOAD_BUCKET, [user], False)
+
+
+@APP.task(base=AuthorizedTask)
+def call_deactivate_account(user: dict, delete: bool) -> None:
+    """
+    Wrapper function for admins to deactivate or delete an account.
+
+    Arguments:
+        user {dict} -- Account record of the user.
+        delete {bool} -- True if the user is to be deleted, false if they are only disabled.
+    """
+    if delete:
+        delete_user_account(user, call_deactivate_account.token["access_token"])
+    else:
+        deactivate_account(user, call_deactivate_account.token["access_token"])
 
 
 @APP.task(base=AuthorizedTask)
@@ -164,7 +183,7 @@ def test_eve_rate_limit(num_requests: int) -> bool:
     Task to test if eve's rate-limit functionality is working.
 
     Arguments:
-        num_requests {int} -- Number of requests to ping eve with
+        num_requests {int} -- Number of requests to ping eve with.
 
     Returns:
         bool -- True if application is rate limited, false if it fails for other reasons or
@@ -229,11 +248,10 @@ def update_last_id(last_log) -> None:
     Updates the lastid file in google buckets to the new ID.
 
     Arguments:
-        last_log {dict} -- Auth0 log entry
+        last_log {dict} -- Auth0 log entry.
     """
     with open("lastid.json", "w") as log:
         json.dump(last_log, log)
-
     gs_args = ["gsutil", "cp", "lastid.json", AUTH0_DOMAIN + "/" + LOGSTORE + "/auth0"]
     subprocess.run(gs_args)
 
@@ -241,12 +259,9 @@ def update_last_id(last_log) -> None:
 @APP.task(base=AuthorizedTask)
 def poll_auth0_logs() -> None:
     """
-    Function that polls the auth0 management API for new logs
+    Function that polls the auth0 management API for new logs.
     """
-    # Get last log
     last_log_id = fetch_last_log_id()
-
-    # Get new logs
     logs_endpoint = "%slogs?from=%s&sort=date%%3A1" % (MANAGEMENT_API, last_log_id)
     headers = {
         "Authorization": "Bearer {}".format(poll_auth0_logs.api_token["access_token"])
@@ -284,7 +299,7 @@ def get_authorized_users(record_info: dict, token: str) -> List[str]:
     """For a given record, return a list of users who can see it.
 
     Arguments:
-        record_info {dict} -- Dictionary with trial and assay id
+        record_info {dict} -- Dictionary with trial and assay id.
         token {str} -- access token.
 
     Returns:
@@ -329,7 +344,6 @@ def change_user_role(user_id: str, token: str, new_role: str, authorizer: str) -
         new_role,
         authorizer,
     )
-
     logging.info({"message": log, "category": "FAIR-CELERY-ACCOUNTS"})
 
 
@@ -378,38 +392,35 @@ def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) 
     blob.acl.save()
 
 
-@APP.task(base=AuthorizedTask)
-def update_trial_blob_acl(trial_id: str, new_acl: List[str]) -> None:
+@APP.task
+def change_upload_permission(
+    bucket_name: str, user_emails: List[str], grant_or_revoke: bool
+) -> None:
     """
-    Updates all access control lists for all blobs associated with a given trial.
+    Changes the user's permissions to upload to a bucket.
 
     Arguments:
-        trial_id {str} -- ID of the trial in question.
-        new_acl {List[str]} -- Up to date list of collaborators on the project.
+        bucket_name {str} -- Name of the bucket.
+        user_emails {List[str]} -- Users to change the access of.
+        grant_or_revoke {bool} -- True if the users are to be granted access, else false.
+
+    Returns:
+        None -- [description]
     """
-    # Get all data from the project.
-    condition = {"trial": trial_id}
-    projection = {"gs_uri": 1}
-    query = "data?where=%sprojection=%s" % (
-        json.dumps(condition),
-        json.dumps(projection),
-    )
-    trial_data = EVE_FETCHER.get(
-        endpoint=query, token=update_trial_blob_acl.token["access_token"]
-    ).json()["_items"]
-    gs_paths = [x["gs_uri"] for x in trial_data]
-
-    # Send the new access control list to the manager function, new users get added
-    # removed users get access revoked.
-    for path in gs_paths:
-        manage_bucket_acl(GOOGLE_BUCKET_NAME, path, new_acl)
-
-
-@APP.task(base=AuthorizedTask)
-def grant_bucket_upload(bucket_name, user_emails):
     bucket = storage.Client().bucket(bucket_name)
+    action = "granted" if grant_or_revoke else "revoked"
     for email in user_emails:
-        bucket.acl.user(email).grant_write()
+        if grant_or_revoke:
+            bucket.acl.user(email).grant_write()
+        else:
+            bucket.acl.user(email).revoke_read()
+            bucket.acl.user(email).revoke_write()
+    log = "Access %s to bucket %s for users: %s" % (
+        action,
+        bucket_name,
+        ", ".join(user_emails),
+    )
+    logging.info({"message": log, "category": "FAIR-CELERY-PERMISSIONS"})
 
 
 def revoke_access(bucket_name: str, gs_paths: List[str], emails: List[str]) -> None:
@@ -431,9 +442,13 @@ def revoke_access(bucket_name: str, gs_paths: List[str], emails: List[str]) -> N
 
         blob.acl.reload()
         for person in emails:
-            log = "Revoked read/write access from " + person + " for object: " + path
-            logging.info({"message": log, "category": "FAIR-CELERY-PERMISSIONS"})
             blob.acl.user(person).revoke_read()
             blob.acl.user(person).revoke_write()
 
         blob.acl.save()
+
+    message = "Access to objects: %s. Revoked for users: %s" % (
+        ", ".join(gs_paths),
+        ", ".join(emails),
+    )
+    logging.info({"message": message, "category": "FAIR-CELERY-PERMISSIONS"})

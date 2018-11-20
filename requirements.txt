@@ -1,5 +1,6 @@
 amqp==2.3.2
 billiard==3.5.0.4
+bson==0.5.7
 cachetools==2.1.0
 celery==4.1.0
 certifi==2018.10.15
@@ -7,7 +8,7 @@ chardet==3.0.4
 coverage==5.0a3
 et-xmlfile==1.0.1
 git+https://github.com/dfci/cidc-utils#egg=cidc-utils
-google-api-core==1.5.0
+google-api-core==1.6.0a1
 google-auth==1.5.1
 google-cloud-core==0.28.1
 google-cloud-storage==1.13.0
@@ -21,13 +22,13 @@ openpyxl==2.5.9
 protobuf==3.6.1
 pyasn1-modules==0.2.2
 pyasn1==0.4.4
-python-dateutil==2.7.3
+python-dateutil==2.7.5
 python-dotenv==0.9.1
 python-json-logger==0.1.9
-pytz==2018.5
+pytz==2018.7
 requests==2.20.0
 rsa==4.0
-selenium==3.14.1
+selenium==3.141.0
 six==1.11.0
 urllib3==1.24
 vine==1.1.4
