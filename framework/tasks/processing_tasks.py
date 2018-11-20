@@ -334,7 +334,7 @@ def update_child_list(record_response: dict, endpoint: str, parent_id: str) -> d
 
         # Update parent record.
         return EVE_FETCHER.patch(
-            endpoint="/data_edit/",
+            endpoint="data_edit",
             item_id=str(parent["_items"][0]["_id"]),
             json={"children": parent["_items"][0]["children"] + new_children},
             _etag=parent["_items"][0]["_etag"],
