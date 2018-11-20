@@ -1,5 +1,3 @@
-![Build Status](http://35.196.130.201/jenk/buildStatus/icon?job=Celery%20Taskmanager/master)
-
 #### Celery Taskmanager
 
 This program is responsible for receiving messages and running tasks. It interfaces with RabbitMQ.
