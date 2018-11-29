@@ -752,12 +752,12 @@ def process_olink_npx(path: str, context: RecordContext) -> dict:
                 }
             )
 
-        # Check gene symbols
-        invalid_err = find_invalid_symbols(
-            [assay["assay"] for assay in olink_record["ol_assay"]]
-        )
-        if invalid_err:
-            olink_record["validation_errors"].append(invalid_err)
+        # # Check gene symbols
+        # invalid_err = find_invalid_symbols(
+        #     [assay["assay"] for assay in olink_record["ol_assay"]]
+        # )
+        # if invalid_err:
+        #     olink_record["validation_errors"].append(invalid_err)
 
         # Get the sample-specific information.
         olink_record["samples"] = validate_qc_info(
