@@ -55,7 +55,7 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
     files = upload_record["files"]
 
     for record in files:
-        record["gs_uri"] = record["gs_uri"] = (
+        record["gs_uri"] = (
             google_path
             + record["trial"]["$oid"]
             + "/"
