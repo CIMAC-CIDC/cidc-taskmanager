@@ -16,6 +16,9 @@ python-dateutil = "*"
 openpyxl = "*"
 selenium = "*"
 bson = "*"
+pytest = "*"
+pytest-cov = "*"
+pytest-html = "*"
 
 [dev-packages]
 pylint = "*"

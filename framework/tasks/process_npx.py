@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Module for tasks that do post-run processing of output files.
 """
