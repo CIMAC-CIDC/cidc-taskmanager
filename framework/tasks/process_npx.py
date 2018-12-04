@@ -4,12 +4,11 @@ Module for tasks that do post-run processing of output files.
 """
 import logging
 import subprocess
-import time
-import requests
 from datetime import datetime
 from os import remove
 from typing import Generator, List, NamedTuple, Tuple
 
+import requests
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
@@ -151,25 +150,30 @@ def find_invalid_symbols(symbol_list: List[str]) -> List[str]:
         "withdrawn": "true",
         "queries[]": symbol_list,
     }
+    try:
+        response = requests.post(HUGO_URL, data=data)
+        if not response.status_code == 200:
+            return mk_error(
+                "Unable to contact Hugo server for gene symbol validation",
+                affected_paths="ol_assays",
+            )
 
-    response = requests.post(HUGO_URL, data=data)
-    if not response.status_code == 200:
-        return mk_error(
-            "Unable to contact Hugo server for gene symbol validation",
-            affected_paths="ol_assays",
-        )
+        unmatched = [
+            symbol["input"]
+            for symbol in response.json()
+            if symbol["matchType"] == "Unmatched"
+        ]
 
-    unmatched = [
-        symbol["input"]
-        for symbol in response.json()
-        if symbol["matchType"] == "Unmatched"
-    ]
-
-    if unmatched:
-        return mk_error(
-            "Found invalid gene symbols: %s" % (", ".join(unmatched)),
-            affected_paths=["ol_assay"],
-        )
+        if unmatched:
+            return mk_error(
+                "Found invalid gene symbols: %s" % (", ".join(unmatched)),
+                affected_paths=["ol_assay"],
+            )
+    except ConnectionError:
+        logging.warning({
+            "message": "Hugo validation website could not be reached",
+            "category": "WARNING-CELERY"
+        })
 
     return None
 
@@ -748,12 +752,12 @@ def process_olink_npx(path: str, context: RecordContext) -> dict:
                 }
             )
 
-        # Check gene symbols
-        invalid_err = find_invalid_symbols(
-            [assay["assay"] for assay in olink_record["ol_assay"]]
-        )
-        if invalid_err:
-            olink_record["validation_errors"].append(invalid_err)
+        # # Check gene symbols
+        # invalid_err = find_invalid_symbols(
+        #     [assay["assay"] for assay in olink_record["ol_assay"]]
+        # )
+        # if invalid_err:
+        #     olink_record["validation_errors"].append(invalid_err)
 
         # Get the sample-specific information.
         olink_record["samples"] = validate_qc_info(
@@ -789,4 +793,6 @@ def process_olink_npx(path: str, context: RecordContext) -> dict:
             )
         )
     lazy_remove(xlsx_path)
+    rec_str = str(olink_record)
+    logging.info({"message": rec_str, "category": "DEBUG-NPX"})
     return olink_record

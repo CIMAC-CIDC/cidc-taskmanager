@@ -14,6 +14,7 @@ CLIENT_SECRET = env.get("CLIENT_SECRET")
 CLIENT_ID = env.get("CLIENT_ID")
 CROMWELL_URL = None
 GOOGLE_BUCKET_NAME = env.get("GOOGLE_BUCKET_NAME")
+GOOGLE_UPLOAD_BUCKET = env.get("GOOGLE_UPLOAD_BUCKET")
 DOMAIN = env.get("DOMAIN")
 EVE_URL = None
 LOGSTORE = env.get("LOGSTORE")
@@ -27,8 +28,7 @@ else:
         env.get("INGESTION_API_SERVICE_HOST"),
         env.get("INGESTION_API_SERVICE_PORT"),
     )
-
     CROMWELL_URL = "http://%s:%s/api/workflows/v1" % (
-        env.get("CROMWELL_SERVER_SERVICE_HOST"),
-        env.get("CROMWELL_SERVER_SERVICE_PORT"),
+        "localhost",
+        "8000"
     )

@@ -11,15 +11,17 @@ from os import remove
 from typing import List
 from uuid import uuid4
 
-import requests
 from celery import group
 from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
 from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.tasks.data_classes import RecordContext
-from framework.tasks.process_npx import (mk_error, process_clinical_metadata,
-                                         process_olink_npx)
+from framework.tasks.process_npx import (
+    mk_error,
+    process_clinical_metadata,
+    process_olink_npx,
+)
 from framework.tasks.variables import EVE_URL
 
 HAPLOTYPE_FIELD_NAMES = [
@@ -28,6 +30,7 @@ HAPLOTYPE_FIELD_NAMES = [
     "synonymous_mutation",
     "non_coding_mutation",
 ]
+EVE_FETCHER = SmartFetch(EVE_URL)
 
 
 def add_record_context(records: List[dict], context: RecordContext) -> None:
@@ -43,7 +46,11 @@ def add_record_context(records: List[dict], context: RecordContext) -> None:
     """
     for record in records:
         record.update(
-            {"trial": context.trial, "assay": context.assay, "record_id": context.record}
+            {
+                "trial": context.trial,
+                "assay": context.assay,
+                "record_id": context.record,
+            }
         )
 
 
@@ -157,7 +164,7 @@ def process_table(path: str, context: RecordContext) -> dict:
     return entries
 
 
-def process_rsem(path: str, context: RecordContext) -> dict:
+def process_rsem(path: str, context: RecordContext) -> List[dict]:
     """
     Processes an rsem type table.
 
@@ -169,7 +176,7 @@ def process_rsem(path: str, context: RecordContext) -> dict:
         IndexError -- [description]
 
     Returns:
-        [dict] -- List of entries, where each row becomes a mongo record.
+        List[dict] -- List of entries, where each row becomes a mongo record.
     """
     first_line = False
     entries = []
@@ -256,14 +263,16 @@ def log_record_upload(records: List[dict], endpoint: str) -> None:
 
 
 def report_validation_issues(response: dict, records: List[dict]) -> List[dict]:
-    """[summary]
+    """
+    If a document fails to be uploaded due to failing schema validation, upload the validation
+    errors so the user can see why.
 
     Arguments:
-        response {dict} -- [description]
-        records {List[dict]} -- [description]
+        response {dict} -- Response object from POST.
+        records {List[dict]} -- List of records.
 
     Returns:
-        List[dict] -- [description]
+        List[dict] -- Returns a list of formatted errors.
     """
     invalid_records = (
         response.json()["_items"] if "_items" in response.json() else [response.json()]
@@ -291,16 +300,19 @@ def report_validation_issues(response: dict, records: List[dict]) -> List[dict]:
 
 def update_child_list(record_response: dict, endpoint: str, parent_id: str) -> dict:
     """
-    Adds item to parent record's child list.
+    Adds item to a record's child list.
 
     Arguments:
-        record {dict} -- [description]
-        endpoint {str} -- [description]
+        record_response {dict} -- Response to POST of new child.
+        endpoint {str} -- Resource endpoint of record.
+        parent_id {str} -- id of parent record.
+
+    Raises:
+        RuntimeError -- [description]
 
     Returns:
-        dict -- [description]
+        dict -- HTTP response to patch.
     """
-    fetcher = SmartFetch(EVE_URL)
     query = {"_id": parent_id}
 
     records = None
@@ -315,31 +327,25 @@ def update_child_list(record_response: dict, endpoint: str, parent_id: str) -> d
 
     try:
         # Get etag of parent.
-        parent = fetcher.get(
+        parent = EVE_FETCHER.get(
             endpoint="data?where=%s" % json.dumps(query),
             token=process_file.token["access_token"],
         ).json()
 
         # Update parent record.
-        res = requests.post(
-            EVE_URL + "/data_edit/%s" % str(parent["_items"][0]["_id"]),
+        return EVE_FETCHER.patch(
+            endpoint="data_edit",
+            item_id=str(parent["_items"][0]["_id"]),
             json={"children": parent["_items"][0]["children"] + new_children},
-            headers={
-                "If-Match": parent["_items"][0]["_etag"],
-                "Authorization": "Bearer {}".format(process_file.token["access_token"]),
-                "X-HTTP-Method-Override": "PATCH",
-            },
+            _etag=parent["_items"][0]["_etag"],
+            token=process_file.token["access_token"],
         )
-        if not res.status_code == 200:
-            raise RuntimeError
-
-        return res
-    except RuntimeError:
-        if parent.status_code != 200:
+    except RuntimeError as code_error:
+        if int(code_error) != 200:
             logging.error(
                 {"message": "Error fetching parent", "category": "ERROR-CELERY-GET"}
             )
-        if res and res.status_code != 200:
+        if parent and int(code_error) != 200:
             logging.error(
                 {
                     "message": "Error updating child list of parent",
@@ -362,7 +368,6 @@ def process_file(rec: dict, pro: str) -> bool:
     Returns:
         boolean -- True if completed without error, else false.
     """
-    eve_fetcher = SmartFetch(EVE_URL)
     temp_file_name = str(uuid4())
     gs_args = ["gsutil", "cp", rec["gs_uri"], temp_file_name]
     subprocess.run(gs_args)
@@ -383,7 +388,7 @@ def process_file(rec: dict, pro: str) -> bool:
 
     try:
         # First try a normal upload
-        response = eve_fetcher.post(
+        response = EVE_FETCHER.post(
             endpoint=pro,
             token=process_file.token["access_token"],
             code=201,
@@ -426,7 +431,7 @@ def process_file(rec: dict, pro: str) -> bool:
             return False
         try:
             # Try to upload just the errors.
-            errors = eve_fetcher.post(
+            errors = EVE_FETCHER.post(
                 endpoint=pro,
                 token=process_file.token["access_token"],
                 code=201,

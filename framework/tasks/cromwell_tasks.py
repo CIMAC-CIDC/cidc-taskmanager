@@ -3,7 +3,6 @@
 Celery tasks for handling some basic interaction with uploaded files.
 """
 import datetime
-import json
 import logging
 import subprocess
 from typing import List
@@ -12,9 +11,9 @@ from uuid import uuid4
 from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
-from framework.tasks.administrative_tasks import manage_bucket_acl
+from framework.tasks.administrative_tasks import manage_bucket_acl, get_authorized_users
 from framework.tasks.AuthorizedTask import AuthorizedTask
-from framework.tasks.variables import EVE_URL, GOOGLE_BUCKET_NAME
+from framework.tasks.variables import EVE_URL, GOOGLE_BUCKET_NAME, GOOGLE_UPLOAD_BUCKET
 
 EVE_FETCHER = SmartFetch(EVE_URL)
 
@@ -40,29 +39,10 @@ def run_subprocess_with_logs(
         )
 
 
-def get_collabs(trial_id: str, token: str) -> dict:
-    """
-    Gets a list of collaborators given a trial ID
-
-    Arguments:
-        trial_id {str} -- ID of trial.
-        token {str} -- Access token.
-
-    Returns:
-        dict -- Mongo response.
-    """
-    trial = {"_id": trial_id}
-    projection = {"collaborators": 1}
-    query = "trials?where=%s&projection=%s" % (
-        json.dumps(trial),
-        json.dumps(projection),
-    )
-    return EVE_FETCHER.get(token=token, endpoint=query)
-
-
 @APP.task(base=AuthorizedTask)
 def move_files_from_staging(upload_record: dict, google_path: str) -> None:
-    """Function that moves a file from staging to permanent storage
+    """
+    Function that moves a file from staging to permanent storage
 
     Decorators:
         APP
@@ -75,8 +55,6 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
     files = upload_record["files"]
 
     for record in files:
-
-        # Construct final data URI
         record["gs_uri"] = (
             google_path
             + record["trial"]["$oid"]
@@ -89,7 +67,7 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
         )
         record["date_created"] = str(datetime.datetime.now().isoformat())
         old_uri = (
-            google_path + "staging/" + staging_id["$oid"] + "/" + record["file_name"]
+            "gs://" + GOOGLE_UPLOAD_BUCKET + "/" + staging_id["$oid"] + "/" + record["file_name"]
         )
 
         # Move file to destination.
@@ -104,11 +82,11 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
         )
         logging.info({"message": log, "category": "FAIR-CELERY-RECORD"})
         # Grant access to files in google storage.
-        collabs = get_collabs(
-            record["trial"], move_files_from_staging.token["access_token"]
+        collabs = get_authorized_users(
+            {"trial": record["trial"], "assay": record["assay"]},
+            move_files_from_staging.token["access_token"],
         )
-        emails = collabs.json()["_items"][0]["collaborators"]
-        manage_bucket_acl(GOOGLE_BUCKET_NAME, record["gs_uri"], emails)
+        manage_bucket_acl(GOOGLE_BUCKET_NAME, record["gs_uri"], collabs)
 
     # when move is completed, insert data objects
     EVE_FETCHER.post(

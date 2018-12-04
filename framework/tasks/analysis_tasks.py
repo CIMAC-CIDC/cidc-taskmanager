@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple celery example
+Tasks related to WDL pipelines.
 """
 import datetime
 import json
@@ -14,7 +14,7 @@ from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
 from framework.tasks.AuthorizedTask import AuthorizedTask
-from framework.tasks.cromwell_tasks import get_collabs, manage_bucket_acl
+from framework.tasks.administrative_tasks import manage_bucket_acl
 from framework.tasks.variables import CROMWELL_URL, EVE_URL
 
 EVE_FETCHER = SmartFetch(EVE_URL)
@@ -34,14 +34,12 @@ def get_run_log(run_id: str) -> dict:
     Returns:
         dict -- Log data.
     """
-    endpoint = run_id + "/logs"
-    log_data = CROMWELL_FETCHER.get(endpoint=endpoint).json()
-    return json.dumps(log_data)
+    return json.dumps(CROMWELL_FETCHER.get(endpoint=run_id + "/logs").json())
 
 
 def add_meta_item(analysis_info: dict, entry: dict) -> dict:
     """
-    Packages cromwell output into a mongo entry
+    Packages cromwell output into a mongo entry.
 
     Arguments:
         analysis_info {dict} -- Dictionary containing run information, specifically emails and
@@ -49,7 +47,7 @@ def add_meta_item(analysis_info: dict, entry: dict) -> dict:
         entry {dict} -- Key-value pair.
 
     Returns:
-        dict -- [description]
+        dict -- Formatted record.
     """
     record = analysis_info["record"]
     (key, value), = entry.items()
@@ -92,7 +90,7 @@ def meta_parse(
             meta_parse(analysis_info, key, value, filegen)
 
 
-def create_analysis_entry(analysis_info: dict, _etag: str, token: str) -> dict:
+def create_analysis_entry(analysis_info: dict, token: str) -> dict:
     """
     Updates the analysis entry with the information from the completed run.
 
@@ -131,16 +129,20 @@ def create_analysis_entry(analysis_info: dict, _etag: str, token: str) -> dict:
             meta_parse(analysis_info, key, value, filegen)
 
     # Insert the analysis object
-    patch_res = requests.patch(
-        EVE_URL + "/analysis/" + analysis_info["record"]["analysis_id"],
-        json=payload_object,
-        headers={"If-Match": _etag, "Authorization": "Bearer {}".format(token)},
-    )
-
-    if not patch_res.status_code == 200:
-        log = "Error communicating with eve: %s" % patch_res.reason
-        logging.error({"message": log, "category": "ERROR-CELERY"})
-        raise RuntimeError
+    try:
+        EVE_FETCHER.patch(
+            endpoint="analysis",
+            item_id=analysis_info["record"]["analysis_id"],
+            _etag=analysis_info["_etag"],
+            token=token,
+            json=payload_object,
+        )
+    except RuntimeError as error:
+        log = "Error patching analysis object: %s, code: %s" % (
+            analysis_info["record"]["analysis_id"],
+            str(error),
+        )
+        logging.error({"message": log, "category": "ERROR-CELERY-ANALYSIS-PATCH"})
 
     # Insert data
     if filegen:
@@ -247,7 +249,7 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
     Constructs the input.json file to run the pipeline.
 
     Arguments:
-        sample_assay {dict} -- Record representing a group of files with the same sampleID
+        sample_assay {dict} -- Record representing a group of files with the same sampleID.
         assay {dict} -- Record entry for the assay being run.
 
     Returns:
@@ -278,7 +280,7 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
     for entry in assay["static_inputs"]:
 
         # Set the prefix using the sample ID.
-        if re.search(r".prefix$", entry["key_name"]):
+        if re.search(r".prefix$", entry["key_name"]): 
             input_dictionary[entry["key_name"]] = sample_id
         else:
             input_dictionary[entry["key_name"]] = entry["key_value"]
@@ -297,10 +299,10 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
 def set_record_processed(records: List[dict], condition: bool) -> bool:
     """
     Takes a list of records, then changes their
-    processed status to match the condition
+    processed status to match the condition.
 
     Arguments:
-        records {[dict]} -- List of "data" collection records.
+        records {List[dict]} -- List of "data" collection records.
         condition {bool} -- True if processed else false.
 
     Returns:
@@ -463,32 +465,20 @@ def analysis_pipeline():
 
         for run in active_runs:
             run_id = run["api_response"]["id"]
-            record = run["record"]
-
-            # Poll status.
-            endpoint = run_id + "/" + "status"
-            response = CROMWELL_FETCHER.get(endpoint=endpoint, code=200).json()[
-                "status"
-            ]
+            response = CROMWELL_FETCHER.get(
+                endpoint=run_id + "/status", code=200
+            ).json()["status"]
 
             # If run has finished, make a record.
-            if response not in ["Submitted", "Running"]:
-
-                # Fetch collaborators to control access.
-                collabs = get_collabs(
-                    record["trial"], analysis_pipeline.token["access_token"]
-                )
-                emails = collabs.json()["_items"][0]["collaborators"]
-
+            if response not in {"Submitted", "Running"}:
                 create_analysis_entry(
                     {
-                        "record": record,
+                        "record": run["record"],
                         "run_id": run_id,
                         "status": response == "Succeeded",
                         "_etag": run["analysis_etag"],
                     },
                     analysis_pipeline.token["access_token"],
-                    emails,
                 )
                 # Add run to filter list.
                 filter_runs.append(run)
