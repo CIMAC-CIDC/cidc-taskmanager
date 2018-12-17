@@ -19,6 +19,7 @@ APP = Celery(
         "framework.tasks.analysis_tasks",
         "framework.tasks.processing_tasks",
         "framework.tasks.administrative_tasks",
+        "framework.tasks.hugo_tasks",
     ],
 )
 
@@ -39,12 +40,14 @@ def setup_periodic_tasks(sender, **kwargs):
         "framework.tasks.administrative_tasks.check_last_login"
     ]
     poll_auth0_logs = APP.tasks["framework.tasks.administrative_tasks.poll_auth0_logs"]
-    logging.info(
-        {"message": "periodic tasks scheduler fired", "category": "INFO-CELERY-DEBUG"}
-    )
+    update_gene_symbols = APP.tasks["framework.tasks.hugo_tasks.refresh_hugo_defs"]
+
     # Check for user expirey once per day, check for auth0 logs once per day
     sender.add_periodic_task(86400, check_last_login.s())
     sender.add_periodic_task(86400, poll_auth0_logs.s())
+
+    # Update hugo definitions once per week.
+    sender.add_periodic_task(604800, update_gene_symbols.s())
 
 
 if __name__ == "__main__":

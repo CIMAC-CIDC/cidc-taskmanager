@@ -91,7 +91,42 @@ spec:
         }
       }
     }
-    stage('Docker deploy (staging)') {
+    stage('Upload report (dev)') {
+      when {
+        not {
+          anyOf {
+            branch "master";
+            branch "staging"
+          }
+        }
+      }
+      steps {
+        container('gcloud') {
+          sh 'gsutil cp celery_tests.html gs://cidc-test-reports/celery/dev'
+        }
+      }
+    }
+    stage('Upload report (staging)') {
+      when {
+        branch 'staging'
+      }
+      steps {
+        container('gcloud') {
+          sh 'gsutil cp celery_tests.html gs://cidc-test-reports/celery/staging'
+        }
+      }
+    }
+    stage('Upload report (master)') {
+      when {
+        branch 'master'
+      }
+      steps {
+        container('gcloud') {
+          sh 'gsutil cp celery_tests.html gs://cidc-test-reports/celery/master'
+        }
+      }
+    }
+    stage('Helm deploy (staging)') {
       when {
           branch 'staging'
       }
