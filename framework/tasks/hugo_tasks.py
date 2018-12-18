@@ -92,7 +92,7 @@ def check_symbols_valid(symbols: List[str]) -> dict:
             json={},
         )
         found = [result["symbol"] for result in results["_items"]]
-        if len(found) == len(results):
+        if len(found) == len(symbols):
             return None
         unmatched = [x for x in symbols if x not in found]
         return mk_error(
@@ -102,6 +102,10 @@ def check_symbols_valid(symbols: List[str]) -> dict:
     except RuntimeError as run:
         error = "Error looking up hugo symbols: %s" % str(run)
         logging.error({"message": error, "category": "ERROR-CELERY-HUGO"})
+        return mk_error(
+            "Was unable to run gene symbol validation, please contact support",
+            affected_paths=[],
+        )
 
 
 def get_gz_ftp(server_url: str, directory: str, file_name: str) -> str:
@@ -136,14 +140,14 @@ def build_gene_collection(tsv: str) -> List[dict]:
     first_line = False
     entries = []
     for line in tsv.split("\n"):
-        if line[0] != "#" and not first_line:
+        if line[0] == "#" and not first_line:
             first_line = True
         elif first_line:
             values = line.split("\t")
             for field in IDENTIFIER_FIELDS:
                 field_value = values[field["key"]]
                 if field["is_array"] and "|" in field_value:
-                    entries.extend([{"symbol": v} for v in field_value.split("|")])
+                    entries.extend([v for v in field_value.split("|")])
                 elif field_value != "-":
-                    entries.append({"symbol": field_value})
-    return entries
+                    entries.append(field_value)
+    return [{ "symbol": entry } for entry in set(entries)]
