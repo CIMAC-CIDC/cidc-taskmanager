@@ -7,11 +7,11 @@ from datetime import datetime
 from os import remove
 from typing import Generator, List, NamedTuple, Tuple
 
-import requests
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
 from framework.tasks.data_classes import RecordContext
+from framework.tasks.hugo_tasks import check_symbols_valid
 
 OLINK_FIRST_COLUMN = ["npx data", "panel", "assay", "uniprot id", "olinkid"]
 HUGO_URL = 'https://beta.genenames.org/cgi-bin/tools/symbol-check'
@@ -24,7 +24,6 @@ MANIFEST_HEADERS = {
     "assay type:": "assay_type",
     "batch number:": "batch_number",
 }
-
 SHIPPING_DETAILS = {
     "shipping condition:": "shipping_condition",
     "date shipped:": "date_shipped",
@@ -126,55 +125,6 @@ def mk_error(
         "raw_or_parse": raw_or_parse,
         "severity": severity,
     }
-
-
-def find_invalid_symbols(symbol_list: List[str]) -> List[str]:
-    """
-    Uses the hugo multi-symbol checker to check a list of gene symbols. Returns list of
-    invalid symbols or an empty list if all valid.
-
-    Arguments:
-        symbol_list {List[str]} -- List of gene symbols to check.
-
-    Returns:
-        List[str] -- List of invalid gene symbols.
-    """
-    data = {
-        "approved": "true",
-        "case": "insensitive",
-        "output": "text",
-        "previous": "true",
-        "synonyms": "true",
-        "unmatched": "true",
-        "withdrawn": "true",
-        "queries[]": symbol_list,
-    }
-    try:
-        response = requests.post(HUGO_URL, data=data)
-        if not response.status_code == 200:
-            return mk_error(
-                "Unable to contact Hugo server for gene symbol validation",
-                affected_paths="ol_assays",
-            )
-
-        unmatched = [
-            symbol["input"]
-            for symbol in response.json()
-            if symbol["matchType"] == "Unmatched"
-        ]
-
-        if unmatched:
-            return mk_error(
-                "Found invalid gene symbols: %s" % (", ".join(unmatched)),
-                affected_paths=["ol_assay"],
-            )
-    except ConnectionError:
-        logging.warning({
-            "message": "Hugo validation website could not be reached",
-            "category": "WARNING-CELERY"
-        })
-
-    return None
 
 
 def add_file_extension(path: str, extension: str) -> str:
@@ -373,7 +323,6 @@ def process_sample_rows(cell_gen: Generator) -> Tuple[int, int, int, int, List[s
     mdf_row = None
     sample_cells = []
     sample_ids = []
-    panel_type_cell = None
 
     for sam_cell in cell_gen:
         value = sam_cell[0].value
@@ -668,6 +617,23 @@ def process_clinical_metadata(path: str, context: RecordContext) -> dict:
         bad_xlsx(metadata_record["validation_errors"], xlsx_path, err)
 
 
+def run_validation(olink_record: RecordContext) -> None:
+    """Runs hugo gene symbol validation.
+
+    Arguments:
+        symbols {List[str]} -- List of genes from record.
+        record {RecordContext} -- Record object.
+
+    Returns:
+        None -- [description]
+    """
+    invalid_err = check_symbols_valid(
+            [assay["assay"] for assay in olink_record["ol_assay"]]
+        )
+    if invalid_err:
+        olink_record["validation_errors"].append(invalid_err)
+
+
 def process_olink_npx(path: str, context: RecordContext) -> dict:
     """
     Processes an olink npx file and creates a record.
@@ -751,12 +717,8 @@ def process_olink_npx(path: str, context: RecordContext) -> dict:
                 }
             )
 
-        # # Check gene symbols
-        # invalid_err = find_invalid_symbols(
-        #     [assay["assay"] for assay in olink_record["ol_assay"]]
-        # )
-        # if invalid_err:
-        #     olink_record["validation_errors"].append(invalid_err)
+        # Check gene symbols
+        run_validation(olink_record)
 
         # Get the sample-specific information.
         olink_record["samples"] = validate_qc_info(
