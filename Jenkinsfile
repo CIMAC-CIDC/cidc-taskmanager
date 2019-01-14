@@ -17,6 +17,11 @@ spec:
     volumeMounts:
     - mountPath: /var/run/docker.sock
       name: docker-volume
+  - name: python
+    image: python:3.6.5
+    command:
+    - cat
+    tty: true
   - name: gcloud
     image: gcr.io/cidc-dfci/gcloud-helm:latest
     command:
@@ -31,11 +36,23 @@ spec:
   }
   environment {
       GOOGLE_APPLICATION_CREDENTIALS = credentials('google-service-account')
+      CODECOV_TOKEN = credentials('cidc-taskmanager-codecov-token')
       CA_CERT_PEM = credentials("ca.cert.pem")
       HELM_CERT_PEM = credentials("helm.cert.pem")
       HELM_KEY_PEM = credentials("helm.key.pem")
   }
   stages {
+    stage('Run unit tests') {
+      steps {
+        container('python') {
+          checkout scm
+          sh 'pip3 install -r requirements.txt'
+          sh 'pytest --html=celery_tests.html'
+          sh 'pytest --cov-report xml:coverage.xml --cov ./'
+          sh 'curl -s https://codecov.io/bash | bash -s - -t ${CODECOV_TOKEN}'
+        }
+      }
+    }
     stage('Checkout SCM') {
       steps {
         container('docker') {
@@ -74,7 +91,42 @@ spec:
         }
       }
     }
-    stage('Docker deploy (staging)') {
+    stage('Upload report (dev)') {
+      when {
+        not {
+          anyOf {
+            branch "master";
+            branch "staging"
+          }
+        }
+      }
+      steps {
+        container('gcloud') {
+          sh 'gsutil cp celery_tests.html gs://cidc-test-reports/celery/dev'
+        }
+      }
+    }
+    stage('Upload report (staging)') {
+      when {
+        branch 'staging'
+      }
+      steps {
+        container('gcloud') {
+          sh 'gsutil cp celery_tests.html gs://cidc-test-reports/celery/staging'
+        }
+      }
+    }
+    stage('Upload report (master)') {
+      when {
+        branch 'master'
+      }
+      steps {
+        container('gcloud') {
+          sh 'gsutil cp celery_tests.html gs://cidc-test-reports/celery/master'
+        }
+      }
+    }
+    stage('Helm deploy (staging)') {
       when {
           branch 'staging'
       }
@@ -88,7 +140,6 @@ spec:
           sh 'helm repo add cidc "http://${CIDC_CHARTMUSEUM_SERVICE_HOST}:${CIDC_CHARTMUSEUM_SERVICE_PORT}" '
           sh 'sleep 10'
           sh '''helm upgrade celery-taskmanager cidc/celery-taskmanager --version=-0.1.0-staging --set imageSHA=$(gcloud container images list-tags --format='get(digest)' --filter='tags:staging' gcr.io/cidc-dfci/celery-taskmanager) --set image.tag=staging --tls'''
-          sh "echo 'upgrade done'"
           sh 'sleep 10'
           sh 'kubectl wait --for=condition=Ready pod -l app=celery-taskmanager --timeout=180s'
         }

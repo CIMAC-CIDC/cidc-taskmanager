@@ -1,3 +1,4 @@
+![codecov](https://codecov.io/gh/dfci/cidc-taskmanager/branch/master/graph/badge.svg)
 #### Celery Taskmanager
 
 This program is responsible for receiving messages and running tasks. It interfaces with RabbitMQ.
@@ -8,6 +9,22 @@ Clone git repository, then run:
 
 ```bash dockerbuild.sh```
 
+#### Running Tests
+
+To run unit tests: 
+
+    pipenv shell
+    pytest
+
+To generate an XML for code coverage plugins:
+
+    pipenv shell
+    pytest --cov-report xml:coverage.xml --cov ./
+
+To generate an HTML output:
+    
+    pipenv shell
+    pytest --html=report.html
 
 #### Configuring Cromwell to Run in the Cloud
 

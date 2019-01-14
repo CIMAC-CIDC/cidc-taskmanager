@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Task subclass that allows processes to share a token
 """
