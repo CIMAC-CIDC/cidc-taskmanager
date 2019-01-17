@@ -6,12 +6,10 @@ import json
 import logging
 import re
 import subprocess
-import time
 from os import remove
 from typing import List
 from uuid import uuid4
 
-from celery import group
 from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
@@ -22,6 +20,7 @@ from framework.tasks.process_npx import (
     process_clinical_metadata,
     process_olink_npx,
 )
+from framework.tasks.parallelize_tasks import execute_in_parallel
 from framework.tasks.variables import EVE_URL
 
 HAPLOTYPE_FIELD_NAMES = [
@@ -63,7 +62,7 @@ def process_hla_file(hla_path: str, context: RecordContext) -> dict:
         context {RecordContext} -- Context object containing assay/trial/parentID.
 
     Returns:
-        [dict] -- Array of HLA mongo records.
+        dict -- Array of HLA mongo records.
     """
     hla_records = []
     with open(hla_path, "r", 8192) as hla:
@@ -110,7 +109,7 @@ def process_hla_file(hla_path: str, context: RecordContext) -> dict:
             except ValueError:
                 logging.error(
                     {
-                        "message": "Attempted to convert a string to an int",
+                        "message": "Attempted to convert a string to an int while processing HLA",
                         "category": "ERROR-CELERY-PROCESSING",
                     },
                     exc_info=True,
@@ -127,7 +126,8 @@ def process_table(path: str, context: RecordContext) -> dict:
         context {RecordContext} -- Context object containing assay/trial/parentID.
 
     Raises:
-        IndexError -- [description]
+        IndexError -- Will be thrown if there is some mismatch number of headers and number of
+            values in a row
 
     Returns:
         [dict] -- List of entries, where each row becomes a mongo record.
@@ -278,6 +278,8 @@ def report_validation_issues(response: dict, records: List[dict]) -> List[dict]:
         response.json()["_items"] if "_items" in response.json() else [response.json()]
     )
     new_upload = []
+    append_to_nu = new_upload.append
+
     for validation_error, record in zip(invalid_records, records):
         if "validation_errors" in record:
             record["validation_errors"].append(
@@ -287,7 +289,7 @@ def report_validation_issues(response: dict, records: List[dict]) -> List[dict]:
                     affected_paths=[],
                 )
             )
-            new_upload.append(
+            append_to_nu(
                 {
                     "assay": record["assay"],
                     "trial": record["trial"],
@@ -313,9 +315,8 @@ def update_child_list(record_response: dict, endpoint: str, parent_id: str) -> d
     Returns:
         dict -- HTTP response to patch.
     """
-    query = {"_id": parent_id}
-
     records = None
+
     if "_items" in record_response:
         records = record_response["_items"]
     else:
@@ -328,7 +329,7 @@ def update_child_list(record_response: dict, endpoint: str, parent_id: str) -> d
     try:
         # Get etag of parent.
         parent = EVE_FETCHER.get(
-            endpoint="data?where=%s" % json.dumps(query),
+            endpoint="data?where=%s" % json.dumps({"_id": parent_id}),
             token=process_file.token["access_token"],
         ).json()
 
@@ -341,11 +342,11 @@ def update_child_list(record_response: dict, endpoint: str, parent_id: str) -> d
             token=process_file.token["access_token"],
         )
     except RuntimeError as code_error:
-        if int(code_error) != 200:
+        if "200" not in str(code_error):
             logging.error(
                 {"message": "Error fetching parent", "category": "ERROR-CELERY-GET"}
             )
-        if parent and int(code_error) != 200:
+        if parent and "200" not in str(code_error):
             logging.error(
                 {
                     "message": "Error updating child list of parent",
@@ -404,12 +405,13 @@ def process_file(rec: dict, pro: str) -> bool:
         # Record uploads.
         log_record_upload(records, pro)
         return True
-    except RuntimeError:
+    except RuntimeError as rte:
         # Catch unexpected error codes.
-        if not response.status_code == 422:
+        if "422" not in str(rte):
+            log = "Upload failed for reasons other than validation: %s" % str(rte)
             logging.error(
                 {
-                    "message": "Upload failed for reasons other than validation.",
+                    "message": log,
                     "category": "ERROR-CELERY-UPLOAD",
                 }
             )
@@ -442,11 +444,12 @@ def process_file(rec: dict, pro: str) -> bool:
             update_child_list(errors.json(), pro, rec["_id"]["$oid"])
 
             log_record_upload(new_upload, pro)
-        except RuntimeError:
+        except RuntimeError as rte:
             # If that fails, something on my end is wrong.
+            log = "Upload of validation errors failed. %s" % str(rte)
             logging.error(
                 {
-                    "message": "Total failure of biomarker upload.",
+                    "message": log,
                     "category": "ERROR-CELERY-UPLOAD",
                 }
             )
@@ -474,23 +477,12 @@ def postprocessing(records: List[dict]) -> None:
                 # If a match is found, add to job queue
                 tasks.append(process_file.s(rec, pro))
 
-    job = group(tasks) if len(tasks) == 1 else group(*tasks)
-    result = job.apply_async()
+    result = execute_in_parallel(tasks, 700, 10)
 
-    for task in tasks:
-        info = "Task: " + task.name + " is now starting"
-        logging.info({"message": info, "category": "DEBUG-CELERY-PROCESSING"})
-
-    # Wait for jobs to finish.
-    cycles = 0
-    while not result.ready() and cycles < 70:
-        time.sleep(10)
-        cycles += 1
-
-    if not result.successful():
+    if not result:
         logging.error(
             {
-                "message": "Error, some of the tasks failed",
+                "message": "Error, some of the data post processing tasks failed",
                 "category": "ERROR-CELERY-PROCESSING",
             }
         )
