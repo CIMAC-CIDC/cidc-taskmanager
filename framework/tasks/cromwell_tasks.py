@@ -86,7 +86,7 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
             {"trial": record["trial"], "assay": record["assay"]},
             move_files_from_staging.token["access_token"],
         )
-        manage_bucket_acl(GOOGLE_BUCKET_NAME, record["gs_uri"], collabs)
+        # manage_bucket_acl(GOOGLE_BUCKET_NAME, record["gs_uri"], collabs)
 
     # when move is completed, insert data objects
     EVE_FETCHER.post(
