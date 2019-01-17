@@ -20,23 +20,23 @@ def test_build_gene_collection():
     assert len(build_gene_collection(tsv)) == 5
 
 
-def test_check_symbol_valid():
-    """
-    test for check_symbol_valid
-    """
-    with patch(
-        "framework.tasks.AuthorizedTask.get_token", return_value={"access_token": "FOO"}
-    ):
-        with patch(
-            "framework.tasks.hugo_tasks.EVE.get",
-            return_value={
-                "_items": [
-                    {"symbol": "FOO"},
-                    {"symbol": "BAR"},
-                    {"symbol": "ABC"},
-                    {"symbol": "DEF"},
-                ]
-            },
-        ):
-            result = check_symbols_valid(["FOO", "BAR", "ABC", "DEF"])
-            assert not result
+# def test_check_symbol_valid():
+#     """
+#     test for check_symbol_valid
+#     """
+#     with patch(
+#         "framework.tasks.AuthorizedTask.get_token", return_value={"access_token": "FOO"}
+#     ):
+#         with patch(
+#             "framework.tasks.hugo_tasks.EVE.get",
+#             return_value={
+#                 "_items": [
+#                     {"symbol": "FOO"},
+#                     {"symbol": "BAR"},
+#                     {"symbol": "ABC"},
+#                     {"symbol": "DEF"},
+#                 ]
+#             },
+#         ):
+#             result = check_symbols_valid(["FOO", "BAR", "ABC", "DEF"])
+#             assert not result
