@@ -1,4 +1,7 @@
-![codecov](https://codecov.io/gh/dfci/cidc-taskmanager/branch/master/graph/badge.svg)
+| Branch | Coverage |
+| --- | --- |
+| Master | [![codecov](https://codecov.io/gh/dfci/cidc-taskmanager/branch/master/graph/badge.svg)](https://codecov.io/gh/dfci/cidc-taskmanager/branch/master/) |
+| Staging | [![codecov](https://codecov.io/gh/dfci/cidc-taskmanager/branch/staging/graph/badge.svg)](https://codecov.io/gh/dfci/cidc-taskmanager/branch/staging/) |
 #### Celery Taskmanager
 
 This program is responsible for receiving messages and running tasks. It interfaces with RabbitMQ.
