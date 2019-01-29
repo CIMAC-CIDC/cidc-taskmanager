@@ -347,16 +347,16 @@ def change_user_role(user_id: str, token: str, new_role: str, authorizer: str) -
     logging.info({"message": log, "category": "FAIR-CELERY-ACCOUNTS"})
 
 
-def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) -> None:
+def manage_bucket_acl(bucket_name: str, gs_path: str, authorized_users: List[str]) -> None:
     """
     Manages bucket authorization for accounts.
 
     Arguments:
         bucket_name {str} -- Name of the google bucket.
         gs_path {str} -- Path to object.
-        collaborators {[str]} -- List of email addresses.
+        authorized_users {[str]} -- List of email addresses.
     """
-    if not collaborators:
+    if not authorized_users:
         logging.warning(
             {
                 "message": "Manage bucket acl called with empty collaborators list",
@@ -375,8 +375,8 @@ def manage_bucket_acl(bucket_name: str, gs_path: str, collaborators: List[str]) 
     # If a person is already authorized, don't add them again.
     existing = [entry["identifier"] for entry in identified]
     # Check for discrepancies in the auth lists.
-    to_deactivate = list(filter(lambda x: x not in collaborators, existing))
-    to_add = list(filter(lambda x: x not in existing, collaborators))
+    to_deactivate = list(filter(lambda x: x not in authorized_users, existing))
+    to_add = list(filter(lambda x: x not in existing, authorized_users))
 
     for person in to_add:
         log = "Gave read access to %s for object: %s" % (person, gs_path)

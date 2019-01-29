@@ -55,11 +55,15 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
     files = upload_record["files"]
 
     for record in files:
+
+        trial_id = record["trial"]["$oid"]
+        assay_id = record["assay"]["$oid"]
+        file_name = record["file_name"]
         record["gs_uri"] = (
             google_path
-            + record["trial"]["$oid"]
+            + trial_id
             + "/"
-            + record["assay"]["$oid"]
+            + assay_id
             + "/"
             + str(uuid4())
             + "/"
@@ -67,26 +71,26 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
         )
         record["date_created"] = str(datetime.datetime.now().isoformat())
         old_uri = (
-            "gs://" + GOOGLE_UPLOAD_BUCKET + "/" + staging_id["$oid"] + "/" + record["file_name"]
+            "gs://" + GOOGLE_UPLOAD_BUCKET + "/" + staging_id["$oid"] + "/" + file_name
         )
 
         # Move file to destination.
-        record["trial"] = record["trial"]["$oid"]
-        record["assay"] = record["assay"]["$oid"]
+        record["trial"] = trial_id
+        record["assay"] = assay_id
         gs_args = ["gsutil", "mv", old_uri, record["gs_uri"]]
         run_subprocess_with_logs(gs_args, "Moving Files: ")
         log = "Moved record: %s from %s to %s" % (
-            record["file_name"],
+            file_name,
             old_uri,
             record["gs_uri"],
         )
         logging.info({"message": log, "category": "FAIR-CELERY-RECORD"})
         # Grant access to files in google storage.
-        collabs = get_authorized_users(
+        authorized_users = get_authorized_users(
             {"trial": record["trial"], "assay": record["assay"]},
             move_files_from_staging.token["access_token"],
         )
-        # manage_bucket_acl(GOOGLE_BUCKET_NAME, record["gs_uri"], collabs)
+        manage_bucket_acl(GOOGLE_BUCKET_NAME, record["gs_uri"], authorized_users)
 
     # when move is completed, insert data objects
     EVE_FETCHER.post(
