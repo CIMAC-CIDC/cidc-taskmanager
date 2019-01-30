@@ -14,8 +14,8 @@ from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
 from framework.tasks.AuthorizedTask import AuthorizedTask
-from framework.tasks.administrative_tasks import manage_bucket_acl
-from framework.tasks.variables import CROMWELL_URL, EVE_URL
+from framework.tasks.administrative_tasks import manage_bucket_acl, get_authorized_users
+from framework.tasks.variables import CROMWELL_URL, EVE_URL, GOOGLE_BUCKET_NAME
 
 EVE_FETCHER = SmartFetch(EVE_URL)
 CROMWELL_FETCHER = SmartFetch(CROMWELL_URL)
@@ -51,7 +51,6 @@ def add_meta_item(analysis_info: dict, entry: dict) -> dict:
     """
     record = analysis_info["record"]
     (key, value), = entry.items()
-    manage_bucket_acl("lloyd-test-pipeline", value, analysis_info["emails"])
 
     return {
         "file_name": key,
@@ -146,14 +145,15 @@ def create_analysis_entry(analysis_info: dict, token: str) -> dict:
 
     # Insert data
     if filegen:
-        return EVE_FETCHER.post(
-            token=token,
-            endpoint="data",
-            json=[
+        json_payload = []
+        for entry in filegen:
+            json_payload.append(
                 {"file_name": entry["file_name"], "gs_uri": entry["gs_uri"]}
-                for entry in filegen
-            ],
-            code=201,
+            )
+            authorized_users = get_authorized_users(entry, token)
+            manage_bucket_acl(GOOGLE_BUCKET_NAME, entry["gs_uri"], authorized_users)
+        return EVE_FETCHER.post(
+            token=token, endpoint="data", json=json_payload, code=201
         )
     return None
 
@@ -280,7 +280,7 @@ def create_input_json(sample_assay: dict, assay: dict) -> dict:
     for entry in assay["static_inputs"]:
 
         # Set the prefix using the sample ID.
-        if re.search(r".prefix$", entry["key_name"]): 
+        if re.search(r".prefix$", entry["key_name"]):
             input_dictionary[entry["key_name"]] = sample_id
         else:
             input_dictionary[entry["key_name"]] = entry["key_value"]

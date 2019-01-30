@@ -139,9 +139,10 @@ spec:
           sh 'cat ${HELM_KEY_PEM} > $(helm home)/key.pem'
           sh 'helm repo add cidc "http://${CIDC_CHARTMUSEUM_SERVICE_HOST}:${CIDC_CHARTMUSEUM_SERVICE_PORT}" '
           sh 'sleep 10'
-          sh '''helm upgrade celery-taskmanager cidc/celery-taskmanager --version=-0.1.0-staging --set imageSHA=$(gcloud container images list-tags --format='get(digest)' --filter='tags:staging' gcr.io/cidc-dfci/celery-taskmanager) --set image.tag=staging --tls'''
+          sh 'helm fetch cidc/celery-taskmanager --version=0.1.0-staging --untar'
+          sh 'helm upgrade celery-taskmanager celery-taskmanager/ -f celery-taskmanager/values_staging.yaml --set imageSHA=$(gcloud container images list-tags --format="get(digest)" --filter="tags:staging" gcr.io/cidc-dfci/celery-taskmanager) --set image.tag=staging --tls'
           sh 'sleep 10'
-          sh 'kubectl wait --for=condition=Ready pod -l app=celery-taskmanager --timeout=180s'
+          sh 'kubectl wait pod -l app=celery-taskmanager --for=condition=Ready --timeout=180s'
         }
       }
     }

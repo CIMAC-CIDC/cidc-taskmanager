@@ -5,3 +5,4 @@ cromwell-workflow-logs/
 cromwell_run/*
 celerybeat-schedule
 *.pyc
+/assets
