@@ -11,7 +11,7 @@ from uuid import uuid4
 from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
-from framework.tasks.administrative_tasks import manage_bucket_acl, get_authorized_users
+from framework.tasks.administrative_tasks import get_authorized_users, manage_bucket_acl
 from framework.tasks.AuthorizedTask import AuthorizedTask
 from framework.tasks.variables import EVE_URL, GOOGLE_BUCKET_NAME, GOOGLE_UPLOAD_BUCKET
 

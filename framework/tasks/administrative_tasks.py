@@ -20,9 +20,9 @@ from framework.tasks.variables import (
     AUTH0_DOMAIN,
     EVE_URL,
     GOOGLE_BUCKET_NAME,
+    GOOGLE_UPLOAD_BUCKET,
     LOGSTORE,
-    MANAGEMENT_API,
-    GOOGLE_UPLOAD_BUCKET
+    MANAGEMENT_API
 )
 
 EVE_FETCHER = SmartFetch(EVE_URL)
