@@ -8,4 +8,3 @@ COPY run.sh /app/run.sh
 WORKDIR /app
 
 CMD sh run.sh
-
