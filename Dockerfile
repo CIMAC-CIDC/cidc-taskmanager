@@ -1,7 +1,7 @@
-FROM gcr.io/cidc-dfci/celery-base
+FROM gcr.io/cidc-dfci/celery-base:debian
 
 COPY ./requirements.txt ./
-RUN pip3 install -r requirements.txt
+RUN python3.6 -m pip install -r requirements.txt
 
 COPY . /app
 COPY run.sh /app/run.sh
