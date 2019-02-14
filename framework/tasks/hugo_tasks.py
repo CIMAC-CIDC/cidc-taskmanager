@@ -1,6 +1,10 @@
+#!/usr/bin/env python
 """
 Utility functions related to gene symbol validation.
 """
+__author__ = "Lloyd McCarthy"
+__license__ = "MIT"
+
 import logging
 import json
 from ftplib import FTP
@@ -9,7 +13,7 @@ from io import BytesIO
 from typing import List
 from cidc_utils.requests import SmartFetch
 from framework.celery.celery import APP
-from framework.tasks.AuthorizedTask import AuthorizedTask
+from framework.tasks.authorized_task import AuthorizedTask
 from framework.tasks.variables import EVE_URL
 from framework.tasks.parallelize_tasks import execute_in_parallel
 
@@ -87,7 +91,9 @@ def refresh_hugo_defs():
         _id = existing["_id"]
         _etag = existing["_etag"]
 
-        # Delete it, stimulating the collection drop.
+        # Delete it. There is a hook in the API that responds to any completed deletion of a
+        # of a record by dropping the whole collection. This is by far the easiest way to
+        # update the collection, 
         EVE.delete(
             endpoint="gene_symbols",
             token=refresh_hugo_defs.token["access_token"],
@@ -96,7 +102,6 @@ def refresh_hugo_defs():
             code=204,
         )
         # Chunk the list to only post 10000 items at a time
-
         tasks = [
             chunked_upload.s(hugo_entries[x : x + 10000])
             for x in range(0, len(hugo_entries), 10000)

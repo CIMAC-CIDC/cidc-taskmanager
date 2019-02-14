@@ -1,7 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 These tasks are responsible for performing administrative and user management tasks.
 """
+__author__ = "Lloyd McCarthy"
+__license__ = "MIT"
+
 import json
 import logging
 import subprocess
@@ -15,7 +18,7 @@ from dateutil.parser import parse
 from google.cloud import storage
 
 from framework.celery.celery import APP
-from framework.tasks.AuthorizedTask import AuthorizedTask
+from framework.tasks.authorized_task import AuthorizedTask
 from framework.tasks.variables import (
     AUTH0_DOMAIN,
     EVE_URL,

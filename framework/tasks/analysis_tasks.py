@@ -1,7 +1,9 @@
-#!/usr/bin/env python3
 """
 Tasks related to WDL pipelines.
 """
+__author__ = "Lloyd McCarthy"
+__license__ = "MIT"
+
 import datetime
 import json
 import logging
@@ -13,7 +15,7 @@ import requests
 from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
-from framework.tasks.AuthorizedTask import AuthorizedTask
+from framework.tasks.authorized_task import AuthorizedTask
 from framework.tasks.administrative_tasks import manage_bucket_acl, get_authorized_users
 from framework.tasks.variables import CROMWELL_URL, EVE_URL, GOOGLE_BUCKET_NAME
 

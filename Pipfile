@@ -19,9 +19,9 @@ bson = "*"
 pytest = "*"
 pytest-cov = "*"
 pytest-html = "*"
-snakemake = {git = "https://github.com/CIMAC-CIDC/cidc-snakemake"}
 pandas = "*"
 kubernetes = "*"
+snakemake = {git = "https://github.com/CIMAC-CIDC/cidc-snakemake"}
 
 [dev-packages]
 pylint = "*"

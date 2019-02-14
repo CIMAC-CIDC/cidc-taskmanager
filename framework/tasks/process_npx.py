@@ -1,6 +1,10 @@
+#!/usr/bin/env python
 """
 Module for tasks that do post-run processing of output files.
 """
+__author__ = "Lloyd McCarthy"
+__license__ = "MIT"
+
 import logging
 import subprocess
 from datetime import datetime
