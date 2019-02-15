@@ -5,6 +5,7 @@ Module for snakemake related functions
 __author__ = "Lloyd McCarthy"
 __license__ = "MIT"
 
+import datetime
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ from framework.tasks.authorized_task import AuthorizedTask
 from framework.tasks.cromwell_tasks import run_subprocess_with_logs
 from framework.tasks.parallelize_tasks import execute_in_parallel
 from framework.tasks.variables import EVE_URL
-from framework.tasks.analysis_tasks import set_record_processed
+from framework.tasks.analysis_tasks import set_record_processed, check_processed
 
 EVE = SmartFetch(EVE_URL)
 
@@ -54,17 +55,17 @@ class SnakeJobSettings(NamedTuple):
 
 
 DEFAULT_SETTINGS = SnakeJobSettings(
-    2, 1000, "default", [KubeToleration("NoSchedule", "snakemake", "Equal", "issnake")]
+    6, 8000, "default", [KubeToleration("NoSchedule", "snakemake", "Equal", "issnake")]
 )
 
 
 def check_for_runs(token: str) -> Tuple[List[dict], List[dict]]:
     """
     Checks to see if any runs can start
-    
+
     Arguments:
         token {str} -- [description]
-    
+
     Returns:
         Tuple[List[dict], List[dict]] -- [description]
     """
@@ -74,7 +75,6 @@ def check_for_runs(token: str) -> Tuple[List[dict], List[dict]]:
 
     # Contains a list of all the running assays and their inputs
     assay_response = EVE.get(token=token, endpoint=assay_query_string).json()["_items"]
-
     sought_mappings = [
         item
         for sublist in [x["non_static_inputs"] for x in assay_response]
@@ -89,9 +89,9 @@ def check_for_runs(token: str) -> Tuple[List[dict], List[dict]]:
         # Create an assay id keyed dictionary to simplify searching.
         assay_dict = {
             assay["_id"]: {
-                "static_inputs": assay["static_inputs"],
                 "non_static_inputs": assay["non_static_inputs"],
                 "assay_name": assay["assay_name"],
+                "workflow_location": assay["workflow_location"]
             }
             for assay in assay_response
         }
@@ -164,6 +164,7 @@ def clone_snakemake(git_url: str, folder_name: str) -> str:
 @APP.task
 def run_snakefile(
     snakefile_path: str = "./Snakefile",
+    workdir: str = "./",
     kube_settings: SnakeJobSettings = DEFAULT_SETTINGS,
 ) -> bool:
     """
@@ -182,6 +183,7 @@ def run_snakefile(
     # run the snakemake job
     return snakemake(
         snakefile_path,
+        workdir=workdir,
         kubernetes=kube_settings.namespace,
         kubernetes_resource_requests={
             "cpu": kube_settings.cpu,
@@ -215,8 +217,19 @@ def create_input_json(records: List[dict], run_id: str, cimac_sample_id: str):
     # Blank this block so it can be redefined
     inputs["sample_files"] = {}
     for record in records:
-        inputs["sample_files"][record["mapping"]] = record["gs_uri"]
+        inputs["sample_files"][record["mapping"]] = record["gs_uri"].replace("gs://lloyd-test-pipeline/", "")
 
+    #GSUTIL copy references....
+    for reference, location in inputs["reference_files"].items():
+        new_path = run_id + "/" + location
+        gsutil_args = [
+            "gsutil",
+            "cp",
+            run_id + "/" + location,
+            "gs://lloyd-test-pipeline/" + new_path
+        ]
+        run_subprocess_with_logs(gsutil_args, "Uploading references")
+        inputs["reference_files"][reference] = new_path
     # Delete old file:
     os.remove(inputs_file)
 
@@ -237,7 +250,7 @@ def map_outputs(run_id: str, cimac_sample_id: str, aggregation_res: dict) -> Lis
     Returns:
         List[dict] -- List of /data format records for upload.
     """
-    output_base_url: str = "gs://lloyd-test-pipeline/runs/%s/results" % run_id
+    output_base_url: str = "runs/%s/results" % run_id
 
     # Parse output map
     output_uri: str = run_id + "/output_schema.json"
@@ -247,15 +260,24 @@ def map_outputs(run_id: str, cimac_sample_id: str, aggregation_res: dict) -> Lis
 
     payload = []
     for output_name, output_location in outputs.items():
-        output_file = [
-            item
-            for item in bucket.list_blobs(
-                prefix=output_base_url + "/" + output_location
-            )
-        ][0]
+        prefix = output_base_url + "/" + output_location
+        try:
+            output_file = [
+                item
+                for item in bucket.list_blobs(
+                    prefix=prefix
+                )
+            ][0]
+        except IndexError:
+            log = "File %s could not be found" % prefix
+            logging.error({
+                "message": log,
+                "category": "ERROR-CELERY-SNAKEMAKE"
+            })
         payload.append(
             {
-                "data_format": "TBD",
+                "data_format": output_name,
+                "date_created": datetime.datetime.now().isoformat(),
                 "file_name": output_file.name.split("/")[-1],
                 "file_size": output_file.size,
                 "sample_ids": [cimac_sample_id],
@@ -282,14 +304,18 @@ def execute_workflow(valid_run: Tuple[dict, dict]):
     Arguments:
         valid_run {Tuple[dict, dict]} -- Tuple of (aggregation result, assay info)
     """
-    set_record_processed(valid_run[0]["records"], True)
+    records, all_free = check_processed(valid_run[0]["records"])
+    logging.info({
+        "message": "Setting files to processed",
+        "category": "INFO-CELERY-SNAKEMAKE"
+    })
+    set_record_processed(records, True)
     aggregation_res = valid_run[0]["_id"]
     cimac_sample_id: str = aggregation_res["sample_ids"][0]
     run_id: str = str(uuid4())
+    snakemake_file = clone_snakemake(valid_run[1]["workflow_location"], run_id)
     create_input_json(valid_run[0]["records"], run_id, cimac_sample_id)
-    result: bool = run_snakefile(
-        clone_snakemake(valid_run[1]["workflow_location"], run_id)
-    )
+    result: bool = run_snakefile(snakemake_file, workdir=run_id)
     if not result:
         logging.error(
             {"message": "Snakemake run failed!", "category": "ERROR-CELERY-SNAKEMAKE"}
@@ -297,7 +323,7 @@ def execute_workflow(valid_run: Tuple[dict, dict]):
     payload = map_outputs(run_id, cimac_sample_id, aggregation_res)
     try:
         upload_results_res = EVE.post(
-            endpoint="data", token=execute_workflow.token["access_token"], json=payload
+            endpoint="data_edit", token=execute_workflow.token["access_token"], json=payload
         )
         if upload_results_res.status_code >= 200:
             logging.info(
@@ -310,7 +336,6 @@ def execute_workflow(valid_run: Tuple[dict, dict]):
     except RuntimeError as rte:
         message = "Upload of snakemake results failed: %s" % str(rte)
         logging.error({"message": message, "category": "ERROR-CELERY-SNAKEMAKE"})
-        set_record_processed(valid_run[0]["records"], False)
         return False
 
 
@@ -331,7 +356,7 @@ def manage_workflows():
         )
 
     # Compute that into valid runs.
-    valid_runs = find_valid_runs(record_response, assay_dict)
+    valid_runs = find_valid_runs(record_response.json()["_items"], assay_dict)
     # Create a list of tasks to execute
     run_tasks = [execute_workflow.s(run) for run in valid_runs]
     # Spin the tasks out.

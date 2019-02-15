@@ -313,7 +313,7 @@ def set_record_processed(records: List[dict], condition: bool) -> bool:
     patch_status = []
     for record in records:
         patch_res = requests.patch(
-            EVE_URL + "/data/" + record["_id"],
+            EVE_URL + "/data_edit/" + record["_id"],
             json={"processed": condition},
             headers={
                 "If-Match": record["_etag"],
