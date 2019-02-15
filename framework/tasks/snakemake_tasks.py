@@ -64,43 +64,41 @@ def check_for_runs(token: str) -> Tuple[List[dict], List[dict]]:
     Checks to see if any runs can start
 
     Arguments:
-        token {str} -- [description]
+        token {str} -- JWT for API.
 
     Returns:
-        Tuple[List[dict], List[dict]] -- [description]
+        Tuple[List[dict], List[dict]] -- Tuple, where each item is a data/assay pairing
+        representing a run that can be started.
     """
-    # Only return assays that have a workflow associated with them
-    assay_query = {"workflow_location": {"$ne": "null"}}
-    assay_query_string = "assays?where=%s" % json.dumps(assay_query)
-
-    # Contains a list of all the running assays and their inputs
-    assay_response = EVE.get(token=token, endpoint=assay_query_string).json()["_items"]
-    sought_mappings = [
-        item
-        for sublist in [x["non_static_inputs"] for x in assay_response]
-        for item in sublist
-    ]
-    query_string = "data/query?aggregate=%s" % (
-        json.dumps({"$inputs": sought_mappings})
-    )
 
     try:
+        # Only return assays that have a workflow associated with them
+        assay_query = {"workflow_location": {"$ne": "null"}}
+        assay_query_string = "assays?where=%s" % json.dumps(assay_query)
+
+        # Contains a list of all the running assays and their inputs
+        assay_response = EVE.get(token=token, endpoint=assay_query_string).json()["_items"]
+        sought_mappings = [
+            item
+            for sublist in [x["non_static_inputs"] for x in assay_response]
+            for item in sublist
+        ]
+        query_string = "data/query?aggregate=%s" % (
+            json.dumps({"$inputs": sought_mappings})
+        )
         record_response = EVE.get(token=token, endpoint=query_string)
         # Create an assay id keyed dictionary to simplify searching.
         assay_dict = {
             assay["_id"]: {
                 "non_static_inputs": assay["non_static_inputs"],
                 "assay_name": assay["assay_name"],
-                "workflow_location": assay["workflow_location"]
+                "workflow_location": assay["workflow_location"],
             }
             for assay in assay_response
         }
         return record_response, assay_dict
-    except RuntimeError:
-        error_msg = "Failed to fetch record: %s. %s" % (
-            record_response.reason,
-            record_response.status_code,
-        )
+    except RuntimeError as rte:
+        error_msg = "Failed to fetch record: %s" % str(rte)
         logging.error({"message": error_msg, "category": "ERROR-CELERY-QUERY"})
         return None
 
@@ -144,7 +142,7 @@ def clone_snakemake(git_url: str, folder_name: str) -> str:
         folder_name {str} -- Name of the folder to create.
 
     Returns:
-        str -- Snakefile path. https://github.com/CIMAC-CIDC/name
+        str -- Snakefile path.
     """
     run_subprocess_with_logs(
         [
@@ -217,16 +215,18 @@ def create_input_json(records: List[dict], run_id: str, cimac_sample_id: str):
     # Blank this block so it can be redefined
     inputs["sample_files"] = {}
     for record in records:
-        inputs["sample_files"][record["mapping"]] = record["gs_uri"].replace("gs://lloyd-test-pipeline/", "")
+        inputs["sample_files"][record["mapping"]] = record["gs_uri"].replace(
+            "gs://lloyd-test-pipeline/", ""
+        )
 
-    #GSUTIL copy references....
+    # GSUTIL copy references....
     for reference, location in inputs["reference_files"].items():
         new_path = run_id + "/" + location
         gsutil_args = [
             "gsutil",
             "cp",
             run_id + "/" + location,
-            "gs://lloyd-test-pipeline/" + new_path
+            "gs://lloyd-test-pipeline/" + new_path,
         ]
         run_subprocess_with_logs(gsutil_args, "Uploading references")
         inputs["reference_files"][reference] = new_path
@@ -262,18 +262,10 @@ def map_outputs(run_id: str, cimac_sample_id: str, aggregation_res: dict) -> Lis
     for output_name, output_location in outputs.items():
         prefix = output_base_url + "/" + output_location
         try:
-            output_file = [
-                item
-                for item in bucket.list_blobs(
-                    prefix=prefix
-                )
-            ][0]
+            output_file = [item for item in bucket.list_blobs(prefix=prefix)][0]
         except IndexError:
             log = "File %s could not be found" % prefix
-            logging.error({
-                "message": log,
-                "category": "ERROR-CELERY-SNAKEMAKE"
-            })
+            logging.error({"message": log, "category": "ERROR-CELERY-SNAKEMAKE"})
         payload.append(
             {
                 "data_format": output_name,
@@ -305,10 +297,9 @@ def execute_workflow(valid_run: Tuple[dict, dict]):
         valid_run {Tuple[dict, dict]} -- Tuple of (aggregation result, assay info)
     """
     records, all_free = check_processed(valid_run[0]["records"])
-    logging.info({
-        "message": "Setting files to processed",
-        "category": "INFO-CELERY-SNAKEMAKE"
-    })
+    logging.info(
+        {"message": "Setting files to processed", "category": "INFO-CELERY-SNAKEMAKE"}
+    )
     set_record_processed(records, True)
     aggregation_res = valid_run[0]["_id"]
     cimac_sample_id: str = aggregation_res["sample_ids"][0]
@@ -323,7 +314,10 @@ def execute_workflow(valid_run: Tuple[dict, dict]):
     payload = map_outputs(run_id, cimac_sample_id, aggregation_res)
     try:
         upload_results_res = EVE.post(
-            endpoint="data_edit", token=execute_workflow.token["access_token"], json=payload
+            endpoint="data_edit",
+            token=execute_workflow.token["access_token"],
+            json=payload,
+            code=201
         )
         if upload_results_res.status_code >= 200:
             logging.info(
