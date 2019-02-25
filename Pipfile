@@ -4,8 +4,8 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-kombu = "==4.1.0"
-celery = "==4.1.0"
+kombu = "==4.2.1"
+celery = "==4.2.1"
 python-dotenv = "*"
 requests = "*"
 cidc_utils = {git = "https://github.com/CIMAC-CIDC/cidc-utils"}
@@ -19,11 +19,17 @@ bson = "*"
 pytest = "*"
 pytest-cov = "*"
 pytest-html = "*"
+pandas = "*"
+kubernetes = "*"
+pygraphviz = "*"
+"flake8-mypy" = "*"
+snakemake = {git = "https://github.com/CIMAC-CIDC/cidc-snakemake.git", ref = "resources"}
 
 [dev-packages]
-pylint = "*"
 "pep8" = "*"
 black = "*"
+"flake8" = "*"
+pylint = "*"
 
 [requires]
 python_version = "3.6"

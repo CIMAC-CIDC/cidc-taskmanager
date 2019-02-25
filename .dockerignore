@@ -1,3 +1,5 @@
 Dockerfile
 docs/
 dockerbuild.sh
+**/*.pyc
+celerybeat-schedule

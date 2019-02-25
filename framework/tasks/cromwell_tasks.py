@@ -1,7 +1,9 @@
-#!/usr/bin/env python3
 """
 Celery tasks for handling some basic interaction with uploaded files.
 """
+__author__ = "Lloyd McCarthy"
+__license__ = "MIT"
+
 import datetime
 import logging
 import subprocess
@@ -12,7 +14,7 @@ from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
 from framework.tasks.administrative_tasks import get_authorized_users, manage_bucket_acl
-from framework.tasks.AuthorizedTask import AuthorizedTask
+from framework.tasks.authorized_task import AuthorizedTask
 from framework.tasks.variables import EVE_URL, GOOGLE_BUCKET_NAME, GOOGLE_UPLOAD_BUCKET
 
 EVE_FETCHER = SmartFetch(EVE_URL)

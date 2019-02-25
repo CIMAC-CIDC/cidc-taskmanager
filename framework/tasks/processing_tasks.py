@@ -1,7 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 Module for tasks that do post-run processing of output files.
 """
+__author__ = "Lloyd McCarthy"
+__license__ = "MIT"
+
 import json
 import logging
 import re
@@ -13,7 +16,7 @@ from uuid import uuid4
 from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
-from framework.tasks.AuthorizedTask import AuthorizedTask
+from framework.tasks.authorized_task import AuthorizedTask
 from framework.tasks.data_classes import RecordContext
 from framework.tasks.process_npx import (
     mk_error,
