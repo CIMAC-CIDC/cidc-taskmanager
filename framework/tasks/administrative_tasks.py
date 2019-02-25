@@ -25,7 +25,7 @@ from framework.tasks.variables import (
     GOOGLE_BUCKET_NAME,
     GOOGLE_UPLOAD_BUCKET,
     LOGSTORE,
-    MANAGEMENT_API
+    MANAGEMENT_API,
 )
 
 EVE_FETCHER = SmartFetch(EVE_URL)
@@ -144,6 +144,33 @@ def deactivate_account(user: dict, token: str) -> None:
     revoke_access(GOOGLE_BUCKET_NAME, gs_uri_list, [user["email"]])
     clear_permissions(user["_id"], token)
     change_upload_permission(GOOGLE_UPLOAD_BUCKET, [user], False)
+
+
+@APP.task(base=AuthorizedTask)
+def add_new_user(new_user: dict) -> None:
+    """
+    Adds a new user to the database.
+    
+    Arguments:
+        new_user {dict} -- New user record.
+    
+    Returns:
+        None -- [description]
+    """
+    try:
+        EVE_FETCHER.post(
+            endpoint="accounts",
+            token=add_new_user.token["access_token"],
+            payload=new_user,
+        )
+        message = "Created a new user: %s" % new_user["email"]
+        logging.info({"message": message, "category": "FAIR-CELERY-NEWUSER"})
+    except RuntimeError as rte:
+        message = "Failed to add new user: %s\nError Message: %s" % (
+            new_user["email"],
+            str(rte),
+        )
+        logging.error({"message": message, "category": "ERROR-FAIR-CELERY-NEWUSER"})
 
 
 def delete_user_account(user: dict, token: str) -> None:
@@ -350,7 +377,9 @@ def change_user_role(user_id: str, token: str, new_role: str, authorizer: str) -
     logging.info({"message": log, "category": "FAIR-CELERY-ACCOUNTS"})
 
 
-def manage_bucket_acl(bucket_name: str, gs_path: str, authorized_users: List[str]) -> None:
+def manage_bucket_acl(
+    bucket_name: str, gs_path: str, authorized_users: List[str]
+) -> None:
     """
     Manages bucket authorization for accounts.
 

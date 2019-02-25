@@ -21,12 +21,15 @@ pytest-cov = "*"
 pytest-html = "*"
 pandas = "*"
 kubernetes = "*"
-snakemake = {git = "https://github.com/CIMAC-CIDC/cidc-snakemake"}
+pygraphviz = "*"
+"flake8-mypy" = "*"
+snakemake = {git = "https://github.com/CIMAC-CIDC/cidc-snakemake.git", ref = "resources"}
 
 [dev-packages]
-pylint = "*"
 "pep8" = "*"
 black = "*"
+"flake8" = "*"
+pylint = "*"
 
 [requires]
 python_version = "3.6"
