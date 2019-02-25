@@ -150,10 +150,10 @@ def deactivate_account(user: dict, token: str) -> None:
 def add_new_user(new_user: dict) -> None:
     """
     Adds a new user to the database.
-    
+
     Arguments:
         new_user {dict} -- New user record.
-    
+
     Returns:
         None -- [description]
     """
@@ -161,7 +161,8 @@ def add_new_user(new_user: dict) -> None:
         EVE_FETCHER.post(
             endpoint="accounts",
             token=add_new_user.token["access_token"],
-            payload=new_user,
+            json=new_user,
+            code=201
         )
         message = "Created a new user: %s" % new_user["email"]
         logging.info({"message": message, "category": "FAIR-CELERY-NEWUSER"})

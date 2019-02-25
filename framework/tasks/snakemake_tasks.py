@@ -9,14 +9,15 @@ import datetime
 import json
 import logging
 import os
+import re
 from typing import List, NamedTuple, Tuple
-from uuid import uuid4
 
 from cidc_utils.requests import SmartFetch
 from google.cloud import storage
 from snakemake import snakemake
 
 from framework.celery.celery import APP
+from framework.tasks.administrative_tasks import get_authorized_users, manage_bucket_acl
 from framework.tasks.authorized_task import AuthorizedTask
 from framework.tasks.cromwell_tasks import run_subprocess_with_logs
 from framework.tasks.parallelize_tasks import execute_in_parallel
@@ -24,6 +25,8 @@ from framework.tasks.variables import EVE_URL
 from framework.tasks.analysis_tasks import set_record_processed, check_processed
 
 EVE = SmartFetch(EVE_URL)
+FILE_EXTENSION_DICT = {"fa": "FASTQ", "fa.gz": "FASTQ", "fq.gz": "FASTQ"}
+SUFFIX_REGEX = re.compile(r"((\.[^\.]*){1,2}$)")
 
 
 class KubeToleration(NamedTuple):
@@ -77,7 +80,9 @@ def check_for_runs(token: str) -> Tuple[List[dict], List[dict]]:
         assay_query_string = "assays?where=%s" % json.dumps(assay_query)
 
         # Contains a list of all the running assays and their inputs
-        assay_response = EVE.get(token=token, endpoint=assay_query_string).json()["_items"]
+        assay_response = EVE.get(token=token, endpoint=assay_query_string).json()[
+            "_items"
+        ]
         sought_mappings = [
             item
             for sublist in [x["non_static_inputs"] for x in assay_response]
@@ -150,7 +155,7 @@ def clone_snakemake(git_url: str, folder_name: str) -> str:
             "clone",
             "--single-branch",
             "--branch",
-            "single_sample",
+            "errorReporting",
             git_url,
             folder_name,
         ],
@@ -195,15 +200,21 @@ def run_snakefile(
     )
 
 
-def create_input_json(records: List[dict], run_id: str, cimac_sample_id: str):
+def create_input_json(
+    records: List[dict], run_id: str, cimac_sample_id: str
+) -> List[dict]:
     """
     Creates the inputs.json for a snakemake run.
 
     Arguments:
         records {List[dict]} -- List of input records to the run.
-        run_id {str} -- str(UUID4) representing run_id
-        cimac_sample_id {str} -- sample_id of run.
+        run_id {str} -- _id representing run_id, uses value of analysis record _id.
+        cimac_sample_id {str} -- Sample_id of run.
+
+    Returns:
+        List[dict] -- List of the input files used in the run.
     """
+    files_used = []
     # Read inputs.json
     inputs_file: str = run_id + "/inputs.json"
     with open(inputs_file, "r") as jso:
@@ -212,11 +223,19 @@ def create_input_json(records: List[dict], run_id: str, cimac_sample_id: str):
     # Fix up the inputs.json
     inputs["run_id"] = run_id
     inputs["meta"]["CIMAC_SAMPLE_ID"] = cimac_sample_id
+
     # Blank this block so it can be redefined
     inputs["sample_files"] = {}
     for record in records:
         inputs["sample_files"][record["mapping"]] = record["gs_uri"].replace(
             "gs://lloyd-test-pipeline/", ""
+        )
+        files_used.append(
+            {
+                "file_name": record["file_name"],
+                "gs_uri": record["gs_uri"],
+                "data_id": record["_id"],
+            }
         )
 
     # GSUTIL copy references....
@@ -237,55 +256,224 @@ def create_input_json(records: List[dict], run_id: str, cimac_sample_id: str):
     with open(inputs_file, "w") as outfile:
         json.dump(inputs, outfile)
 
+    return files_used
 
-def map_outputs(run_id: str, cimac_sample_id: str, aggregation_res: dict) -> List[dict]:
+
+def register_analysis(valid_run: Tuple[dict, dict], token: str) -> dict:
     """
-    Finds the outputs from the output file and returns them in /data format.
+    Register an analysis job.
 
     Arguments:
-        run_id {str} -- Id of the run.
-        cimac_sample_id {str} -- Sample ID being analyzed.
-        aggregation_res {dict} -- Result from the aggregation query.
+        valid_run {Tuple[dict, dict]} -- Records + assay.
 
     Returns:
-        List[dict] -- List of /data format records for upload.
+        dict -- Dictionary with _id and _etag.
     """
-    output_base_url: str = "runs/%s/results" % run_id
+    payload = valid_run[0]["_id"]
+    payload["workflow_location"] = valid_run[1]["workflow_location"]
+    payload["start_date"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    results = EVE.get(endpoint="analysis", token=token, code=201, json=payload).json()
+    return {"_id": results["_id"], "_etag": results["_etag"]}
 
-    # Parse output map
-    output_uri: str = run_id + "/output_schema.json"
-    with open(output_uri, "r") as out:
-        outputs: dict = json.load(out)
-    bucket = storage.Client().get_bucket("lloyd-test-pipeline")
 
-    payload = []
-    for output_name, output_location in outputs.items():
-        prefix = output_base_url + "/" + output_location
+def upload_snakelogs(analysis_id: str) -> List[str]:
+    """
+    Upload snakemake's logs to google bucket.
+
+    Arguments:
+        analysis_id {str} -- Id of the analysis run.
+
+    Returns:
+        List[str] -- List of gs uris for snakelogs.
+    """
+    snakeslogs: List[str] = os.listdir("%s/.snakemake/log/" % analysis_id)
+    filenames = str.join("\n", snakeslogs)
+    gsutil_args = [
+        "printf",
+        filenames,
+        "gsutil",
+        "-m",
+        "cp",
+        "-I",
+        "gs://lloyd-test-pipeline/runs/%s/logs" % analysis_id,
+    ]
+    run_subprocess_with_logs(gsutil_args, message="Copying snakelogs to bucket...")
+    return [
+        "gs://lloyd-test-pipeline/runs/%s/logs/%s" % (analysis_id, log)
+        for log in snakeslogs
+    ]
+
+
+def analyze_jobs(dag) -> Tuple[List[dict], List[str]]:
+    """
+    Analyze a list of job objects and return information.
+
+    Arguments:
+        dag {} -- Snakemake dag object.
+
+    Returns:
+        Tuple[List[dict], List[str]] -- Job entries, output urls.
+    """
+    job_list: List[dict] = []
+    output_list: List[str] = []
+    for job in dag.jobs:
+        job_entry = {
+            "job_name": job.name,
+            "log_locations": job.log,
+            "completed": bool(job in dag.finished_jobs),
+            "inputs": [],
+            "outputs": [],
+        }
         try:
-            output_file = [item for item in bucket.list_blobs(prefix=prefix)][0]
-        except IndexError:
-            log = "File %s could not be found" % prefix
-            logging.error({"message": log, "category": "ERROR-CELERY-SNAKEMAKE"})
+            job_entry["inputs"] = job.inputs
+            outputs = job.outputs
+            output_list = output_list + outputs
+            job_entry["outputs"] = outputs
+
+        except AttributeError:
+            pass
+        job_list.append(job_entry)
+    return job_list, output_list
+
+
+def get_data_format(name: str) -> str:
+    """
+    Takes a file's name and returns a data format.
+
+    Arguments:
+        name {str} -- File name.
+
+    Returns:
+        str -- Data format.
+    """
+    try:
+        extension = re.search(SUFFIX_REGEX, name).group(0)
+        data_format = FILE_EXTENSION_DICT.get(extension, extension[1::].upper())
+    except AttributeError:
+        data_format = "UNKNOWN"
+    return data_format
+
+
+def upload_results(valid_run: dict, outputs: List[str], token: str) -> List[dict]:
+    """
+    Upload the output files from a run.
+
+    Arguments:
+        valid_run {dict} -- Run information.
+        outputs {List[str]} -- List of GS-uris of output files.
+        token {str} -- JWT
+
+    Returns:
+        List[dict] -- List of inserted records.
+    """
+    payload = []
+    bucket = storage.Client().get_bucket("lloyd-test-pipeline")
+    aggregation_res = valid_run[0]["_id"]
+    for output in outputs:
+        prefix = output.replace("gs://lloyd-test-pipeline", "")
+        output_file = [item for item in bucket.list_blobs(prefix=prefix)][0]
         payload.append(
             {
-                "data_format": output_name,
-                "date_created": datetime.datetime.now().isoformat(),
+                "data_format": get_data_format(output),
+                "date_created": datetime.datetime.now(
+                    datetime.timezone.utc
+                ).isoformat(),
                 "file_name": output_file.name.split("/")[-1],
                 "file_size": output_file.size,
-                "sample_ids": [cimac_sample_id],
-                "number_of_samples": 1,
+                "sample_ids": aggregation_res["sample_ids"],
+                "number_of_samples": len(aggregation_res["sample_ids"]),
                 "trial": aggregation_res["trial"],
                 "trial_name": aggregation_res["trial_name"],
                 "assay": aggregation_res["assay"],
-                "gs_uri": output_file.path[3:],
-                "mapping": output_name,
+                "gs_uri": "gs://lloyd-test-pipeline/" + output_file.name,
+                "mapping": "",
                 "experimental_strategy": aggregation_res["experimental_strategy"],
                 "processed": False,
                 "visibility": True,
                 "children": [],
             }
         )
-    return payload
+        authorized_users = get_authorized_users(
+            {"assay": aggregation_res["assay"], "trial": aggregation_res["trial"]},
+            token,
+        )
+        manage_bucket_acl(
+            "lloyd-test-pipeline", payload[-1]["gs_uri"], authorized_users
+        )
+    try:
+        inserts = EVE.post(endpoint="data", code=201, token=token, json=payload).json()[
+            "_items"
+        ]
+        logging.info(
+            {
+                "message": "Records created for run outputs",
+                "category": "FAIR-CELERY-SNAKEMAKE",
+            }
+        )
+        return [
+            {"data_id": x["_id"], "gs_uri": y["gs_uri"], "file_name": y["file_name"]}
+            for x, y in zip(inserts, payload)
+        ]
+    except RuntimeError as rte:
+        message = "Upload of run outputs failed: %s" % str(rte)
+        logging.error({"message": message, "category": "ERROR-CELERY-UPLOAD"})
+        return None
+
+
+def update_analysis(
+    valid_run: Tuple[dict, dict], token: str, analysis: dict, dag, problem=None
+) -> bool:
+    """
+    Update analysis record with results when the analysis has completed.
+
+    Arguments:
+        valid_run {Tuple[dict, dict]} -- Information about the run.
+        token {str} -- JWT
+        analysis {dict} -- Analysis id, _etag, input files.
+        dag {snakemake.dag.DAG} -- DAG objet from the finished run.
+        problem {str} -- Error message, string "Error" or None.
+
+    Returns:
+        bool -- True if update completes without error, else false.
+    """
+    payload = valid_run[0]["_id"]
+    payload["workflow_location"] = valid_run[1]["workflow_location"]
+    jobs, outputs = analyze_jobs(dag)
+    payload["jobs"] = jobs
+    payload["snakemake_logs"] = upload_snakelogs(analysis["_id"])
+    payload["files_used"] = analysis["files_used"]
+    payload["end_date"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    # If job succeeds, upload files.
+    if outputs and not problem:
+        payload["files_generated"] = upload_results(valid_run, outputs, token)
+
+    if problem:
+        payload["status"] = "Failed"
+        if problem == "Error":
+            payload["error_message"] = (
+                "One of the jobs experienced an error,"
+                + "please consult the logs for more information"
+            )
+        else:
+            payload["error_message"] = "Snakefile Error: %s" % str(problem)
+    else:
+        payload["status"] = "Completed"
+
+    # some upload function.
+    try:
+        EVE.patch(
+            endpoint="analysis",
+            token=token,
+            _etag=analysis["_etag"],
+            item_id=analysis["_id"],
+            json=payload,
+        )
+    except RuntimeError as rte:
+        str_error = "Analysis update failed: %s" % str(rte)
+        logging.error({"message": str_error, "category": "ERROR-CELERY-PATCH"})
+        return False
+    return True
 
 
 @APP.task(base=AuthorizedTask)
@@ -296,41 +484,63 @@ def execute_workflow(valid_run: Tuple[dict, dict]):
     Arguments:
         valid_run {Tuple[dict, dict]} -- Tuple of (aggregation result, assay info)
     """
-    records, all_free = check_processed(valid_run[0]["records"])
+    # Check that all records are unprocessed.
+    token = execute_workflow.token["access_token"]
+    records, all_free = check_processed(valid_run[0]["records"], token)
+    analysis_response = register_analysis(
+        valid_run, token
+    )
+    if not all_free:
+        logging.error(
+            {
+                "message": "Some input files are processed, check celery logic!",
+                "category": "ERROR-CELERY-SNAKEMAKE",
+            }
+        )
+        return False
     logging.info(
         {"message": "Setting files to processed", "category": "INFO-CELERY-SNAKEMAKE"}
     )
-    set_record_processed(records, True)
+    set_record_processed(records, True, token)
+
+    # reference shortcuts
     aggregation_res = valid_run[0]["_id"]
     cimac_sample_id: str = aggregation_res["sample_ids"][0]
-    run_id: str = str(uuid4())
+    run_id: str = str(analysis_response["_id"])
+
     snakemake_file = clone_snakemake(valid_run[1]["workflow_location"], run_id)
-    create_input_json(valid_run[0]["records"], run_id, cimac_sample_id)
-    result: bool = run_snakefile(snakemake_file, workdir=run_id)
-    if not result:
+    analysis_response["files_used"] = create_input_json(
+        valid_run[0]["records"], run_id, cimac_sample_id
+    )
+
+    # Run Snakefile.
+    workflow_dag, problem = run_snakefile(snakemake_file, workdir=run_id)
+
+    # If run fails, log it, reset records, return False.
+    if problem:
         logging.error(
             {"message": "Snakemake run failed!", "category": "ERROR-CELERY-SNAKEMAKE"}
         )
-    payload = map_outputs(run_id, cimac_sample_id, aggregation_res)
-    try:
-        upload_results_res = EVE.post(
-            endpoint="data_edit",
-            token=execute_workflow.token["access_token"],
-            json=payload,
-            code=201
+        records, all_free = check_processed(valid_run[0]["records"], token)
+        set_record_processed(records, False, token)
+        error_str = str(problem)
+        logging.error({"message": error_str, "category": "ERROR-CELERY-SNAKEMAKE"})
+        update_analysis(
+            valid_run,
+            token,
+            analysis_response,
+            workflow_dag,
+            problem=problem,
         )
-        if upload_results_res.status_code >= 200:
-            logging.info(
-                {
-                    "message": "Upload of output files succesful",
-                    "category": "INFO-CELERY-FAIR-SNAKEMAKE",
-                }
-            )
-        return True
-    except RuntimeError as rte:
-        message = "Upload of snakemake results failed: %s" % str(rte)
-        logging.error({"message": message, "category": "ERROR-CELERY-SNAKEMAKE"})
         return False
+
+    # Update analysis entry w/ success
+    update_analysis(
+        valid_run,
+        token,
+        analysis_response,
+        workflow_dag,
+    )
 
 
 @APP.task(base=AuthorizedTask)
@@ -362,7 +572,7 @@ def manage_workflows():
         if results:
             logging.info(
                 {
-                    "message": "Snakemake run succesful",
+                    "message": "Snakemake run successful",
                     "category": "INFO-CELERY-SNAKEMAKE",
                 }
             )
