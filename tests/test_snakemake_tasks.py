@@ -15,7 +15,6 @@ from framework.tasks.snakemake_tasks import (
     find_valid_runs,
     clone_snakemake,
     create_input_json,
-    map_outputs,
 )
 
 RECORD_RESPONSE = [
@@ -59,48 +58,14 @@ RECORD_RESPONSE_BAD = [
 ]
 
 
-def test_map_outputs():
-    """
-    Test map_outputs
-    """
-    with open("tests/testdir/output_schema.json", "a"):
-        os.utime("tests/testdir/output_schema.json", None)
-
-    with patch("google.cloud.storage.Client", return_value=FakeClient()):
-        with patch("json.load", return_value={"FOO": "BAR"}):
-            outputs = map_outputs(
-                "tests/testdir",
-                "A",
-                {
-                    "trial": "123",
-                    "trial_name": "trial_1",
-                    "assay": "234",
-                    "experimental_strategy": "assay_1",
-                },
-            )
-            if len(outputs) != 1:
-                raise AssertionError
-        with patch("json.load", return_value={"FOO": "fail"}):
-            try:
-                map_outputs(
-                    "tests/testdir",
-                    "A",
-                    {
-                        "trial": "123",
-                        "trial_name": "trial_1",
-                        "assay": "234",
-                        "experimental_strategy": "assay_1",
-                    },
-                )
-                raise AssertionError("Error failed to trip")
-            except UnboundLocalError:
-                pass
-
-
 def test_create_input_json():
     """
     Test create_input_json.
     """
+    try:
+        os.mkdir("tests/testdir")
+    except FileExistsError:
+        pass
     with open("tests/testdir/inputs.json", "a"):
         os.utime("tests/testdir/inputs.json", None)
     with patch(
@@ -115,7 +80,14 @@ def test_create_input_json():
         with patch(
             "framework.tasks.snakemake_tasks.run_subprocess_with_logs", return_value=""
         ):
-            records = [{"mapping": "INPUT_1", "gs_uri": "gs://lloyd-test-pipeline/foo"}]
+            records = [
+                {
+                    "mapping": "INPUT_1",
+                    "gs_uri": "gs://lloyd-test-pipeline/foo",
+                    "file_name": "foo.fa",
+                    "_id": "1234"
+                }
+            ]
             create_input_json(records, "tests/testdir", "A")
             if not os.path.isfile("tests/testdir/inputs.json"):
                 raise AssertionError("Inputs file not created")
