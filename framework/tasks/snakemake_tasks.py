@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 from typing import List, NamedTuple, Tuple
 
 from cidc_utils.requests import SmartFetch
@@ -55,10 +56,11 @@ class SnakeJobSettings(NamedTuple):
     memory: int
     namespace: str
     tolerations: List[KubeToleration]
+    singularity: bool
 
 
 DEFAULT_SETTINGS = SnakeJobSettings(
-    6, 8000, "default", [KubeToleration("NoSchedule", "snakemake", "Equal", "issnake")]
+    6, 8000, "default", [KubeToleration("NoSchedule", "snakemake", "Equal", "issnake")], True
 )
 
 
@@ -80,7 +82,7 @@ def check_for_runs(token: str) -> Tuple[List[dict], List[dict]]:
         assay_query_string = "assays?where=%s" % json.dumps(assay_query)
 
         # Contains a list of all the running assays and their inputs
-        assay_response = EVE.get(token=token, endpoint=assay_query_string).json()[
+        assay_response = EVE.get(token=token, endpoint=assay_query_string, code=200).json()[
             "_items"
         ]
         sought_mappings = [
@@ -91,7 +93,7 @@ def check_for_runs(token: str) -> Tuple[List[dict], List[dict]]:
         query_string = "data/query?aggregate=%s" % (
             json.dumps({"$inputs": sought_mappings})
         )
-        record_response = EVE.get(token=token, endpoint=query_string)
+        record_response = EVE.get(token=token, endpoint=query_string, code=200)
         # Create an assay id keyed dictionary to simplify searching.
         assay_dict = {
             assay["_id"]: {
@@ -155,7 +157,7 @@ def clone_snakemake(git_url: str, folder_name: str) -> str:
             "clone",
             "--single-branch",
             "--branch",
-            "errorReporting",
+            "jason",
             git_url,
             folder_name,
         ],
@@ -197,6 +199,7 @@ def run_snakefile(
         ],
         default_remote_prefix="lloyd-test-pipeline",
         default_remote_provider="GS",
+        use_singularity=kube_settings.singularity
     )
 
 
@@ -272,7 +275,8 @@ def register_analysis(valid_run: Tuple[dict, dict], token: str) -> dict:
     payload = valid_run[0]["_id"]
     payload["workflow_location"] = valid_run[1]["workflow_location"]
     payload["start_date"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    results = EVE.get(endpoint="analysis", token=token, code=201, json=payload).json()
+    payload["status"] = "In Progress"
+    results = EVE.post(endpoint="analysis", token=token, code=201, json=payload).json()
     return {"_id": results["_id"], "_etag": results["_etag"]}
 
 
@@ -286,21 +290,24 @@ def upload_snakelogs(analysis_id: str) -> List[str]:
     Returns:
         List[str] -- List of gs uris for snakelogs.
     """
-    snakeslogs: List[str] = os.listdir("%s/.snakemake/log/" % analysis_id)
-    filenames = str.join("\n", snakeslogs)
+    snakelogs: List[str] = os.listdir("%s/.snakemake/log/" % analysis_id)
+    snakelogs_fullpath = [
+        "%s/.snakemake/log/%s" % (analysis_id, logname) for logname in snakelogs
+    ]
+    filenames = str.join("\n", snakelogs_fullpath)
+    fileprint = subprocess.Popen(("printf", filenames), stdout=subprocess.PIPE)
     gsutil_args = [
-        "printf",
-        filenames,
         "gsutil",
         "-m",
         "cp",
         "-I",
         "gs://lloyd-test-pipeline/runs/%s/logs" % analysis_id,
     ]
-    run_subprocess_with_logs(gsutil_args, message="Copying snakelogs to bucket...")
+    subprocess.check_output(gsutil_args, stdin=fileprint.stdout)
+    fileprint.wait()
     return [
         "gs://lloyd-test-pipeline/runs/%s/logs/%s" % (analysis_id, log)
-        for log in snakeslogs
+        for log in snakelogs
     ]
 
 
@@ -325,8 +332,8 @@ def analyze_jobs(dag) -> Tuple[List[dict], List[str]]:
             "outputs": [],
         }
         try:
-            job_entry["inputs"] = job.inputs
-            outputs = job.outputs
+            job_entry["inputs"] = job.input
+            outputs = job.output
             output_list = output_list + outputs
             job_entry["outputs"] = outputs
 
@@ -370,7 +377,11 @@ def upload_results(valid_run: dict, outputs: List[str], token: str) -> List[dict
     bucket = storage.Client().get_bucket("lloyd-test-pipeline")
     aggregation_res = valid_run[0]["_id"]
     for output in outputs:
-        prefix = output.replace("gs://lloyd-test-pipeline", "")
+        prefix = output.replace("lloyd-test-pipeline/", "")
+        logging.info({
+            "message": prefix,
+            "category": "PREFIX-EBUG"
+        })
         output_file = [item for item in bucket.list_blobs(prefix=prefix)][0]
         payload.append(
             {
@@ -401,7 +412,7 @@ def upload_results(valid_run: dict, outputs: List[str], token: str) -> List[dict
             "lloyd-test-pipeline", payload[-1]["gs_uri"], authorized_users
         )
     try:
-        inserts = EVE.post(endpoint="data", code=201, token=token, json=payload).json()[
+        inserts = EVE.post(endpoint="data_edit", code=201, token=token, json=payload).json()[
             "_items"
         ]
         logging.info(
@@ -468,6 +479,7 @@ def update_analysis(
             _etag=analysis["_etag"],
             item_id=analysis["_id"],
             json=payload,
+            code=200
         )
     except RuntimeError as rte:
         str_error = "Analysis update failed: %s" % str(rte)
@@ -487,9 +499,7 @@ def execute_workflow(valid_run: Tuple[dict, dict]):
     # Check that all records are unprocessed.
     token = execute_workflow.token["access_token"]
     records, all_free = check_processed(valid_run[0]["records"], token)
-    analysis_response = register_analysis(
-        valid_run, token
-    )
+    analysis_response = register_analysis(valid_run, token)
     if not all_free:
         logging.error(
             {
@@ -526,21 +536,13 @@ def execute_workflow(valid_run: Tuple[dict, dict]):
         error_str = str(problem)
         logging.error({"message": error_str, "category": "ERROR-CELERY-SNAKEMAKE"})
         update_analysis(
-            valid_run,
-            token,
-            analysis_response,
-            workflow_dag,
-            problem=problem,
+            valid_run, token, analysis_response, workflow_dag, problem=problem
         )
         return False
 
     # Update analysis entry w/ success
-    update_analysis(
-        valid_run,
-        token,
-        analysis_response,
-        workflow_dag,
-    )
+    update_analysis(valid_run, token, analysis_response, workflow_dag)
+    return True
 
 
 @APP.task(base=AuthorizedTask)
@@ -568,18 +570,19 @@ def manage_workflows():
         logging.info(
             {"message": "Snakemake tasks starting", "category": "INFO-CELERY-SNAKEMAKE"}
         )
-        results = execute_in_parallel(run_tasks, 1000, 10)
-        if results:
+        try:
+            execute_in_parallel(run_tasks, 1000, 10)
             logging.info(
                 {
                     "message": "Snakemake run successful",
                     "category": "INFO-CELERY-SNAKEMAKE",
                 }
             )
-        else:
+        except RuntimeError as rte:
+            str_log = "Snakemake run failed: %s" % str(rte)
             logging.info(
                 {
-                    "message": "Snakemake run failed",
+                    "message": str_log,
                     "category": "ERROR-CELERY-SNAKEMAKE",
                 }
             )

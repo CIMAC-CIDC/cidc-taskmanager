@@ -18,3 +18,4 @@ class RecordContext(NamedTuple):
     trial: str
     assay: str
     record: str
+    full_record: dict=None
