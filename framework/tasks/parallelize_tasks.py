@@ -1,6 +1,10 @@
+#!/usr/bin/env python
 """
 Utility method for executing sub-tasks.
 """
+__author__ = "Lloyd McCarthy"
+__license__ = "MIT"
+
 import time
 from typing import List
 from celery import group

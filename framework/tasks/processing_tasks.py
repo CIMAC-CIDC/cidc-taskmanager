@@ -1,11 +1,15 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 Module for tasks that do post-run processing of output files.
 """
+__author__ = "Lloyd McCarthy"
+__license__ = "MIT"
+
 import json
 import logging
 import re
 import subprocess
+import time
 from os import remove
 from typing import List
 from uuid import uuid4
@@ -13,22 +17,17 @@ from uuid import uuid4
 from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
-from framework.tasks.AuthorizedTask import AuthorizedTask
+from framework.tasks.authorized_task import AuthorizedTask
+from framework.tasks.cromwell_tasks import run_subprocess_with_logs
 from framework.tasks.data_classes import RecordContext
+from framework.tasks.parallelize_tasks import execute_in_parallel
 from framework.tasks.process_npx import (
     mk_error,
     process_clinical_metadata,
     process_olink_npx,
 )
-from framework.tasks.parallelize_tasks import execute_in_parallel
 from framework.tasks.variables import EVE_URL
 
-HAPLOTYPE_FIELD_NAMES = [
-    "allele_group",
-    "hla_allele",
-    "synonymous_mutation",
-    "non_coding_mutation",
-]
 EVE_FETCHER = SmartFetch(EVE_URL)
 
 
@@ -53,71 +52,7 @@ def add_record_context(records: List[dict], context: RecordContext) -> None:
         )
 
 
-def process_hla_file(hla_path: str, context: RecordContext) -> dict:
-    """
-    Turns an .hla file into an array of HLA mongo entries.
-
-    Arguments:
-        hla_path {str} -- Path to input file.
-        context {RecordContext} -- Context object containing assay/trial/parentID.
-
-    Returns:
-        dict -- Array of HLA mongo records.
-    """
-    hla_records = []
-    with open(hla_path, "r", 8192) as hla:
-        for line in hla:
-            # Split into columns
-            columns = line.split()
-            try:
-                hla_record = {
-                    "gene_name": columns[0],
-                    "haplotypes": [],
-                    "assay": context.assay,
-                    "trial": context.trial,
-                    "record_id": context.record,
-                }
-                for i in range(1, len(columns)):
-                    haplotype = columns[i]
-                    haplotype_fields = haplotype.split("_")
-                    haplotype_record = {}
-
-                    # Check for suffix.
-                    if len(haplotype_fields) > 1:
-                        # If suffix is found, store value, then trim.
-                        if not str.isdigit(haplotype_fields[-1][-1]):
-                            haplotype_record["suffix"] = haplotype_fields[-1][-1]
-                            haplotype_fields[-1] = haplotype_fields[-1][:-1]
-
-                    # Add all parts of the record that are present.
-                    for j in range(2, len(haplotype_fields)):
-                        haplotype_record[HAPLOTYPE_FIELD_NAMES[j - 2]] = int(
-                            haplotype_fields[j]
-                        )
-
-                    hla_record["haplotypes"].append(haplotype_record)
-
-                hla_records.append(hla_record)
-            except IndexError:
-                logging.error(
-                    {
-                        "message": "There was a problem with the format of the HLA file",
-                        "category": "ERROR-CELERY-PROCESSING",
-                    },
-                    exc_info=True,
-                )
-            except ValueError:
-                logging.error(
-                    {
-                        "message": "Attempted to convert a string to an int while processing HLA",
-                        "category": "ERROR-CELERY-PROCESSING",
-                    },
-                    exc_info=True,
-                )
-    return hla_records
-
-
-def process_table(path: str, context: RecordContext) -> dict:
+def process_table(path: str, context: RecordContext) -> List[dict]:
     """
     Processes any table format data assuming the first row is a header row.
 
@@ -130,7 +65,7 @@ def process_table(path: str, context: RecordContext) -> dict:
             values in a row
 
     Returns:
-        [dict] -- List of entries, where each row becomes a mongo record.
+        List[dict] -- List of entries, where each row becomes a mongo record.
     """
     first_line = False
     entries = []
@@ -164,80 +99,120 @@ def process_table(path: str, context: RecordContext) -> dict:
     return entries
 
 
-def process_rsem(path: str, context: RecordContext) -> List[dict]:
+def process_maf(path: str, context: RecordContext) -> bool:
     """
-    Processes an rsem type table.
+    Processes a new maf file to update the combined maf.
 
     Arguments:
-        path {str} -- Path to file.
-        context {RecordContext} -- Context object containing assay/trial/parentID.
-
-    Raises:
-        IndexError -- [description]
+        path {str} -- On disk path of the file.
+        context {RecordContext} -- Class holding trial, assay, and a copy of the record.
 
     Returns:
-        List[dict] -- List of entries, where each row becomes a mongo record.
+        bool -- True if finished without error, else false.
     """
-    first_line = False
-    entries = []
-    with open(path, "r", 8192) as table:
-        column_headers = []
-        for line in table:
-            if not first_line:
-                first_line = True
-                column_headers = [
-                    header.strip().replace('"', "").replace(".", "")
-                    for header in line.split("\t")
-                ]
-            elif first_line:
-                values = line.split("\t")
-                if not len(column_headers) == len(values):
+
+    # Exit if it is a processed record.
+    if context.full_record["file_name"] == "combined.maf":
+        return True
+
+    # Check if a combined maf already exists.
+    query_string = "data?where=%s" % json.dumps(
+        {"trial": context.trial, "assay": context.assay, "file_name": "combined.maf"}
+    )
+    extant_combined_maf = EVE_FETCHER.get(
+        endpoint=query_string, token=process_file.token["access_token"]
+    ).json()["_items"]
+
+    new_record = context.full_record
+    if not extant_combined_maf:
+        # Rename and create a new data entry.
+        new_record["file_name"] = "combined.maf"
+        new_record.__delitem__("_id")
+        new_record.__delitem__("_etag")
+        new_record.__delitem__("_created")
+        new_record.__delitem__("_updated")
+        new_record.__delitem__("_links")
+        new_record.__delitem__("_status")
+        new_record["trial"] = context.trial
+        new_record["assay"] = context.assay
+        new_record["processed"] = True
+        new_record["gs_uri"] = (
+            new_record["gs_uri"].replace(new_record["file_name"], "") + "/combined.maf"
+        )
+        run_subprocess_with_logs(
+            ["gsutil", "mv", path, new_record["gs_uri"]],
+            message="creating new combined maf: %s" % new_record["gs_uri"],
+        )
+        try:
+            EVE_FETCHER.post(
+                endpoint="data_edit",
+                token=process_file.token["access_token"],
+                json=new_record,
+                code=201,
+            )
+            return True
+        except RuntimeError as rte:
+            if "412" in str(rte):
+                try:
+                    time.sleep(20)
+                    process_maf(path, context)
+                except RuntimeError as rte2:
+                    error_str = "Failed to create new combined.maf: %s" % str(rte2)
                     logging.error(
-                        {
-                            "message": "Header and value length mismatch!",
-                            "category": "ERROR-CELERY-PROCESSING",
-                        }
+                        {"message": error_str, "category": "ERROR-CELERY-POST"}
                     )
-                    raise IndexError
-                entries.append(
-                    dict(
-                        (
-                            column_headers[i],
-                            values[i].strip().replace('"', "").split(",")
-                            if column_headers[i] == "transcript_id(s)"
-                            else values[i].strip().replace('"', ""),
-                        )
-                        for i, j in enumerate(values)
-                    )
-                )
+                    return False
+            error_str = "Failed to create new combined.maf: %s" % str(rte)
+            logging.error({"message": error_str, "category": "ERROR-CELERY-POST"})
+            return False
 
-    add_record_context(entries, context)
-    return entries
+    combined_maffile = extant_combined_maf[0]
+    maf_gs_uri = combined_maffile["gs_uri"]
+    combined_file_name = str(uuid4())
+    run_subprocess_with_logs(
+        ["gsutil", "mv", maf_gs_uri, combined_file_name],
+        message="copying combined maf file %s" % maf_gs_uri,
+    )
 
+    # Get lines of file
+    with open(combined_file_name, "a") as outfile, open(path, "r") as new_maf:
+        # Trim off the version and headers
+        new_maf.readline()
+        new_maf.readline()
+        line = new_maf.readline()
+        while line:
+            outfile.write(new_maf.readline())
+            line = new_maf.readline()
 
-# This is a dictionary of all the currently supported filetypes for storage in
-# MongoDB, with 're' indicating the regex to identify them from their
-# filename, 'func' being the function used to create the mongo object and
-# the key indicating the API endpoint the records are posted to.
+    # Overwrite old file.
+    run_subprocess_with_logs(
+        ["gsutil", "mv", combined_file_name, maf_gs_uri],
+        message="Overwriting old combined.maf: %s" % maf_gs_uri,
+    )
+    new_sample_ids = combined_maffile["sample_ids"] + new_record["sample_ids"]
 
-PROC = {
-    "hla": {"re": r"[._]hla[._]", "func": process_hla_file},
-    "vcf": {"re": r".maf$", "func": process_table},
-    "neoantigen": {
-        "re": r".combined.all.binders.txt.annot.txt.clean.txt$",
-        "func": process_table,
-    },
-    "purity": {"re": r"^Facets_output.", "func": process_table},
-    "clonality_cluster": {"re": r"^cluster.tsv$", "func": process_table},
-    "loci": {"re": r"^loci.tsv$", "func": process_table},
-    "confints_cp": {"re": r"^sample_confints_CP.", "func": process_table},
-    "pyclone": {"re": r".pyclone.tsv$", "func": process_table},
-    "cnv": {"re": r"_segments", "func": process_table},
-    "rsem_expression": {"re": r"_expression.genes$", "func": process_rsem},
-    "rsem_isoforms": {"re": r"_expression.isoforms$", "func": process_table},
-    "olink": {"re": r"olink.*npx", "func": process_olink_npx},
-    "olink_meta": {"re": r"olink.*biorepository", "func": process_clinical_metadata},
-}
+    # Patch data to include new samples.
+    try:
+        EVE_FETCHER.patch(
+            endpoint="data_edit",
+            item_id=combined_maffile["_id"],
+            _etag=combined_maffile["_etag"],
+            json={"sample_ids": new_sample_ids, "number_of_samples": len(new_sample_ids)},
+            token=process_file.token["access_token"]
+        )
+        return True
+    except RuntimeError as rte:
+        if "412" in str(rte):
+            try:
+                time.sleep(20)
+                process_maf(path, context)
+            except RuntimeError as rte2:
+                error_str = "Failed to edit combined.maf: %s" % str(rte2)
+                logging.error({"message": error_str, "category": "ERROR-CELERY-PATCH"})
+                return False
+        error_str = "Failed to create new combined.maf: %s" % str(rte)
+        logging.error({"message": error_str, "category": "ERROR-CELERY-POST"})
+        return False
 
 
 def log_record_upload(records: List[dict], endpoint: str) -> None:
@@ -356,6 +331,22 @@ def update_child_list(record_response: dict, endpoint: str, parent_id: str) -> d
         return None
 
 
+# This is a dictionary of all the currently supported filetypes for storage in
+# MongoDB, with 're' indicating the regex to identify them from their
+# filename, 'func' being the function used to create the mongo object and
+# the key indicating the API endpoint the records are posted to. The mongo key
+# indicates whether or not the filetype should be converted to mongo records.
+PROC = {
+    "olink": {"re": r"olink.*npx", "func": process_olink_npx, "mongo": True},
+    "olink_meta": {
+        "re": r"olink.*biorepository",
+        "func": process_clinical_metadata,
+        "mongo": True,
+    },
+    "maf": {"re": r".maf$", "func": process_maf, "mongo": False},
+}
+
+
 @APP.task(base=AuthorizedTask)
 def process_file(rec: dict, pro: str) -> bool:
     """
@@ -377,15 +368,26 @@ def process_file(rec: dict, pro: str) -> bool:
 
     try:
         # Use a random filename as tasks are executing in parallel.
-        records = PROC[pro]["func"](
-            temp_file_name,
-            RecordContext(
-                rec["trial"]["$oid"], rec["assay"]["$oid"], rec["_id"]["$oid"]
-            ),
-        )
+        if PROC[pro]["mongo"]:
+            records = PROC[pro]["func"](
+                temp_file_name,
+                RecordContext(
+                    rec["trial"]["$oid"], rec["assay"]["$oid"], rec["_id"]["$oid"]
+                ),
+            )
+        else:
+            PROC[pro]["func"](
+                temp_file_name,
+                RecordContext(
+                    rec["trial"]["$oid"], rec["assay"]["$oid"], rec["_id"]["$oid"], rec
+                ),
+            )
         remove(temp_file_name)
     except OSError:
         pass
+
+    if not PROC[pro]["mongo"]:
+        return True
 
     try:
         # First try a normal upload
@@ -409,12 +411,7 @@ def process_file(rec: dict, pro: str) -> bool:
         # Catch unexpected error codes.
         if "422" not in str(rte):
             log = "Upload failed for reasons other than validation: %s" % str(rte)
-            logging.error(
-                {
-                    "message": log,
-                    "category": "ERROR-CELERY-UPLOAD",
-                }
-            )
+            logging.error({"message": log, "category": "ERROR-CELERY-UPLOAD"})
             return False
 
         # Extract Cerberus errors from response.
@@ -447,12 +444,7 @@ def process_file(rec: dict, pro: str) -> bool:
         except RuntimeError as rte:
             # If that fails, something on my end is wrong.
             log = "Upload of validation errors failed. %s" % str(rte)
-            logging.error(
-                {
-                    "message": log,
-                    "category": "ERROR-CELERY-UPLOAD",
-                }
-            )
+            logging.error({"message": log, "category": "ERROR-CELERY-UPLOAD"})
             return False
 
 

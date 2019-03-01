@@ -20,6 +20,7 @@ APP = Celery(
         "framework.tasks.processing_tasks",
         "framework.tasks.administrative_tasks",
         "framework.tasks.hugo_tasks",
+        "framework.tasks.snakemake_tasks"
     ],
 )
 

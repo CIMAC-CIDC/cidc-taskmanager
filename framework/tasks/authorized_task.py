@@ -1,6 +1,10 @@
+#!/usr/bin/env python
 """
 Task subclass that allows processes to share a token
 """
+__author__ = "Lloyd McCarthy"
+__license__ = "MIT"
+
 import time
 import requests
 from celery import Task
