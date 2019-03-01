@@ -56,10 +56,11 @@ class SnakeJobSettings(NamedTuple):
     memory: int
     namespace: str
     tolerations: List[KubeToleration]
+    singularity: bool
 
 
 DEFAULT_SETTINGS = SnakeJobSettings(
-    6, 8000, "default", [KubeToleration("NoSchedule", "snakemake", "Equal", "issnake")]
+    6, 8000, "default", [KubeToleration("NoSchedule", "snakemake", "Equal", "issnake")], True
 )
 
 
@@ -81,7 +82,7 @@ def check_for_runs(token: str) -> Tuple[List[dict], List[dict]]:
         assay_query_string = "assays?where=%s" % json.dumps(assay_query)
 
         # Contains a list of all the running assays and their inputs
-        assay_response = EVE.get(token=token, endpoint=assay_query_string).json()[
+        assay_response = EVE.get(token=token, endpoint=assay_query_string, code=200).json()[
             "_items"
         ]
         sought_mappings = [
@@ -92,7 +93,7 @@ def check_for_runs(token: str) -> Tuple[List[dict], List[dict]]:
         query_string = "data/query?aggregate=%s" % (
             json.dumps({"$inputs": sought_mappings})
         )
-        record_response = EVE.get(token=token, endpoint=query_string)
+        record_response = EVE.get(token=token, endpoint=query_string, code=200)
         # Create an assay id keyed dictionary to simplify searching.
         assay_dict = {
             assay["_id"]: {
@@ -156,7 +157,7 @@ def clone_snakemake(git_url: str, folder_name: str) -> str:
             "clone",
             "--single-branch",
             "--branch",
-            "single_sample",
+            "jason",
             git_url,
             folder_name,
         ],
@@ -198,6 +199,7 @@ def run_snakefile(
         ],
         default_remote_prefix="lloyd-test-pipeline",
         default_remote_provider="GS",
+        use_singularity=kube_settings.singularity
     )
 
 
@@ -375,7 +377,11 @@ def upload_results(valid_run: dict, outputs: List[str], token: str) -> List[dict
     bucket = storage.Client().get_bucket("lloyd-test-pipeline")
     aggregation_res = valid_run[0]["_id"]
     for output in outputs:
-        prefix = output.replace("gs://lloyd-test-pipeline", "")
+        prefix = output.replace("lloyd-test-pipeline/", "")
+        logging.info({
+            "message": prefix,
+            "category": "PREFIX-EBUG"
+        })
         output_file = [item for item in bucket.list_blobs(prefix=prefix)][0]
         payload.append(
             {
@@ -406,7 +412,7 @@ def upload_results(valid_run: dict, outputs: List[str], token: str) -> List[dict
             "lloyd-test-pipeline", payload[-1]["gs_uri"], authorized_users
         )
     try:
-        inserts = EVE.post(endpoint="data", code=201, token=token, json=payload).json()[
+        inserts = EVE.post(endpoint="data_edit", code=201, token=token, json=payload).json()[
             "_items"
         ]
         logging.info(
@@ -473,6 +479,7 @@ def update_analysis(
             _etag=analysis["_etag"],
             item_id=analysis["_id"],
             json=payload,
+            code=200
         )
     except RuntimeError as rte:
         str_error = "Analysis update failed: %s" % str(rte)
@@ -535,6 +542,7 @@ def execute_workflow(valid_run: Tuple[dict, dict]):
 
     # Update analysis entry w/ success
     update_analysis(valid_run, token, analysis_response, workflow_dag)
+    return True
 
 
 @APP.task(base=AuthorizedTask)
@@ -570,10 +578,11 @@ def manage_workflows():
                     "category": "INFO-CELERY-SNAKEMAKE",
                 }
             )
-        except RuntimeError:
+        except RuntimeError as rte:
+            str_log = "Snakemake run failed: %s" % str(rte)
             logging.info(
                 {
-                    "message": "Snakemake run failed",
+                    "message": str_log,
                     "category": "ERROR-CELERY-SNAKEMAKE",
                 }
             )
