@@ -71,7 +71,9 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
             + "/"
             + record["file_name"]
         )
-        record["date_created"] = str(datetime.datetime.now().isoformat())
+        record["date_created"] = str(
+            datetime.datetime.now(datetime.timezone.utc).isoformat()
+        )
         old_uri = (
             "gs://" + GOOGLE_UPLOAD_BUCKET + "/" + staging_id["$oid"] + "/" + file_name
         )
@@ -81,11 +83,7 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
         record["assay"] = assay_id
         gs_args = ["gsutil", "mv", old_uri, record["gs_uri"]]
         run_subprocess_with_logs(gs_args, "Moving Files: ")
-        log = "Moved record: %s from %s to %s" % (
-            file_name,
-            old_uri,
-            record["gs_uri"],
-        )
+        log = "Moved record: %s from %s to %s" % (file_name, old_uri, record["gs_uri"])
         logging.info({"message": log, "category": "FAIR-CELERY-RECORD"})
         # Grant access to files in google storage.
         authorized_users = get_authorized_users(

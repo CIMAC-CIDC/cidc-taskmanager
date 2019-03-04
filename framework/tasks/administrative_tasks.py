@@ -14,7 +14,6 @@ from os import remove
 from typing import List
 
 import requests
-from bson import ObjectId
 from cidc_utils.requests import SmartFetch
 from dateutil.parser import parse
 from google.cloud import storage
@@ -243,7 +242,7 @@ def check_last_login() -> None:
     """
     # Get list of accounts and their last logins.
     user_results = EVE_FETCHER.get(
-        token=check_last_login.token["access_token"], endpoint="accounts"
+        token=check_last_login.token["access_token"], endpoint="last_access"
     ).json()["_items"]
 
     # Define relevant time periods and get current time.
@@ -401,7 +400,7 @@ def grant_trial_access(users: List[str], admin: str, trial: dict) -> None:
         user_obj = user_res["_items"][0]
         try:
             user_obj["permissions"].append(
-                {"assay": None, "trial": trial["_id"]["$oid"], "role": "trial_w"}
+                {"assay": None, "trial": trial["_id"]["$oid"], "role": "trial_r"}
             )
             EVE_FETCHER.patch(
                 endpoint="accounts",
