@@ -8,11 +8,13 @@ __license__ = "MIT"
 import json
 import logging
 import subprocess
+
 from datetime import datetime, timedelta, timezone
 from os import remove
 from typing import List
 
 import requests
+from bson import ObjectId
 from cidc_utils.requests import SmartFetch
 from dateutil.parser import parse
 from google.cloud import storage
@@ -162,7 +164,7 @@ def add_new_user(new_user: dict) -> None:
             endpoint="accounts",
             token=add_new_user.token["access_token"],
             json=new_user,
-            code=201
+            code=201,
         )
         message = "Created a new user: %s" % new_user["email"]
         logging.info({"message": message, "category": "FAIR-CELERY-NEWUSER"})
@@ -376,6 +378,50 @@ def change_user_role(user_id: str, token: str, new_role: str, authorizer: str) -
         authorizer,
     )
     logging.info({"message": log, "category": "FAIR-CELERY-ACCOUNTS"})
+
+
+@APP.task(base=AuthorizedTask)
+def grant_trial_access(users: List[str], admin: str, trial: dict) -> None:
+    """
+    Adds a list of users as trial_w on a trial.
+
+    Arguments:
+        users {List[str]} -- List of users to add to the trial
+        admin {str} -- Email of the admin making the change.
+        trial {str} -- Trial the users are being added to.
+
+    Returns:
+        None -- [description]
+    """
+    token = grant_trial_access.token["access_token"]
+    for user in users:
+        conditional = {"email": user}
+        query = "accounts?where=%s" % json.dumps(conditional)
+        user_res = EVE_FETCHER.get(endpoint=query, token=token).json()
+        user_obj = user_res["_items"][0]
+        try:
+            user_obj["permissions"].append(
+                {"assay": None, "trial": trial["_id"]["$oid"], "role": "trial_w"}
+            )
+            EVE_FETCHER.patch(
+                endpoint="accounts",
+                item_id=user_obj["_id"],
+                _etag=user_obj["_etag"],
+                token=token,
+                json={"permissions": user_obj["permissions"]},
+            )
+            log = "Administrator %s added permissions for trial %s, to user %s" % (
+                admin,
+                trial["trial_name"],
+                user,
+            )
+            logging.info({"message": log, "category": "FAIR-CELERY-PERMISSIONS"})
+        except RuntimeError as rte:
+            log = (
+                "Error: Administrator %s failed to update permissions for user %s: %s"
+                % (admin, user, str(rte))
+            )
+            logging.error({"message": log, "category": "ERROR-CELERY-PERMISSIONS"})
 
 
 def manage_bucket_acl(
