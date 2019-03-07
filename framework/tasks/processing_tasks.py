@@ -178,7 +178,6 @@ def process_maf(path: str, context: RecordContext) -> bool:
     with open(combined_file_name, "a") as outfile, open(path, "r") as new_maf:
         # Trim off the version and headers
         new_maf.readline()
-        new_maf.readline()
         line = new_maf.readline()
         while line:
             outfile.write(new_maf.readline())
