@@ -14,7 +14,6 @@ from os import remove
 from typing import List
 
 import requests
-from bson import ObjectId
 from cidc_utils.requests import SmartFetch
 from dateutil.parser import parse
 from google.cloud import storage
@@ -45,11 +44,7 @@ def get_user_trials(user_email: str, token: str) -> List[dict]:
         List[dict] -- List of trials user is a collaborator on.
     """
     collabs = {"collaborators": user_email}
-    projection = {"_id": 1}
-    query = "trials?where=%s&projection=%s" % (
-        json.dumps(collabs),
-        json.dumps(projection),
-    )
+    query = "trials?where=%s" % json.dumps(collabs)
     return EVE_FETCHER.get(token=token, endpoint=query).json()["_items"]
 
 
@@ -68,20 +63,39 @@ def get_user_records(permissions: List[dict], token: str) -> List[str]:
     assay_access = []
     conditions = {"$or": []}
     for perm in permissions:
+        trial_id = None
+        assay_id = None
+        if perm["trial"]:
+            trial_id = perm["trial"]["$oid"]
+        if perm["assay"]:
+            assay_id = perm["assay"]["$oid"]
         if perm["role"] in ["trial_r", "trial_w"]:
-            trial_access.append(perm["trial"])
-            conditions["$or"].append({"trial": perm["trial"]})
+            trial_access.append(trial_id)
+            conditions["$or"].append({"trial": trial_id})
         if perm["role"] in ["assay_r", "assay_w"]:
-            assay_access.append({"assay": perm["assay"]})
-            conditions["$or"].append(perm["assay"])
+            assay_access.append({"assay": assay_id})
+            conditions["$or"].append(assay_id)
 
     for perm in permissions:
+        trial_id = None
+        assay_id = None
+        if perm["trial"]:
+            trial_id = perm["trial"]["$oid"]
+        if perm["assay"]:
+            assay_id = perm["assay"]["$oid"]
         if perm["trial"] not in trial_access and perm["assay"] not in assay_access:
-            conditions["or"].append({"trial": perm["trial"], "assay": perm["assay"]})
+            conditions["$or"].append({"trial": trial_id, "assay": assay_id})
 
     query = "data?where=%s" % json.dumps(conditions)
-    records = EVE_FETCHER.get(token=token, endpoint=query).json()["items"]
-    return [records["gs_uri"] for record in records]
+    try:
+        records = EVE_FETCHER.get(token=token, endpoint=query).json()["_items"]
+        return [record["gs_uri"] for record in records]
+    except RuntimeError as rte:
+        log = "get_user_records failed with error %s. Query structure = %s" % (
+            str(rte),
+            query,
+        )
+        logging.error({"message": log, "category": "ERROR-CELERY-ORQUERY"})
 
 
 def clear_permissions(user_id: str, token: str) -> None:
@@ -96,7 +110,19 @@ def clear_permissions(user_id: str, token: str) -> None:
         None -- [description]
     """
     query = "accounts/%s" % user_id
-    user_etag = EVE_FETCHER.get(endpoint=query, token=token)["_etag"]
+    try:
+        user_etag = EVE_FETCHER.get(endpoint=query, token=token)["_etag"]
+    except RuntimeError as rte:
+        if "404" in str(rte):
+            log = (
+                "Account %s was not found by the account deactivation function."
+                " This may be because of a purge function." % user_id
+            )
+            logging.warning({"message": log, "category": "WARN-EVE-DEACTIVATE"})
+        else:
+            log = "unspecified error %s" % str(rte)
+            logging.error({"message": log, "category": "ERROR-EVE-DEACTIVATE"})
+        return
     update = {"permissions": []}
     try:
         EVE_FETCHER.patch(
@@ -119,14 +145,20 @@ def deactivate_account(user: dict, token: str) -> None:
     matched_trials = get_user_trials(user["email"], token)
 
     # Update all of those trials to remove the individual.
-    update = {"$pull": {"collaborators": user["email"]}}
     trial_names = []
 
     for trial in matched_trials:
+        new_collaborators = list(
+            filter(lambda x: x != user["email"], trial["collaborators"])
+        )
         try:
             trial_names.append(trial["trial_name"])
             EVE_FETCHER.patch(
-                endpoint="trials", item_id=trial["_id"], token=token, json=update
+                endpoint="trials",
+                item_id=trial["_id"],
+                token=token,
+                json={"collaborators": new_collaborators},
+                _etag=trial["_etag"],
             )
         except RuntimeError:
             per_log = "Error trying to delete %s from collaborators for trial %s" % (
@@ -144,14 +176,14 @@ def deactivate_account(user: dict, token: str) -> None:
     # Get list of records person is likely to be authorized on.
     gs_uri_list = get_user_records(user["permissions"], token)
     revoke_access(GOOGLE_BUCKET_NAME, gs_uri_list, [user["email"]])
-    clear_permissions(user["_id"], token)
-    change_upload_permission(GOOGLE_UPLOAD_BUCKET, [user], False)
+    clear_permissions(user["_id"]["$oid"], token)
+    change_upload_permission(GOOGLE_UPLOAD_BUCKET, [user["email"]], False)
 
 
 @APP.task(base=AuthorizedTask)
 def add_new_user(new_user: dict) -> None:
     """
-    Adds a new user to the database.
+    Updates a newly added user in the db to have the appropriate fields.
 
     Arguments:
         new_user {dict} -- New user record.
@@ -160,11 +192,19 @@ def add_new_user(new_user: dict) -> None:
         None -- [description]
     """
     try:
-        EVE_FETCHER.post(
+        query = "accounts?where=%s" % json.dumps({"email": new_user["email"]})
+        record = EVE_FETCHER.get(
+            endpoint=query, token=add_new_user.token["access_token"]
+        ).json()["_items"][0]
+        etag = record["_etag"]
+        item_id = record["_id"]
+        EVE_FETCHER.patch(
             endpoint="accounts",
             token=add_new_user.token["access_token"],
+            _etag=etag,
+            item_id=item_id,
             json=new_user,
-            code=201,
+            code=200,
         )
         message = "Created a new user: %s" % new_user["email"]
         logging.info({"message": message, "category": "FAIR-CELERY-NEWUSER"})
@@ -190,24 +230,30 @@ def delete_user_account(user: dict, token: str) -> None:
     EVE_FETCHER.delete(endpoint=url, token=token, headers=headers)
     log = "Deleted user account: %s" % user["email"]
     logging.info({"message": log, "category": "FAIR-CELERY-ACCOUNTS"})
-    gs_uri_list = get_user_records(user["permissions"], token)
-    revoke_access(GOOGLE_BUCKET_NAME, gs_uri_list, [user["email"]])
-    change_upload_permission(GOOGLE_UPLOAD_BUCKET, [user], False)
 
 
 @APP.task(base=AuthorizedTask)
-def call_deactivate_account(user: dict, delete: bool) -> None:
+def call_deactivate_account(user: dict, method: str) -> None:
     """
     Wrapper function for admins to deactivate or delete an account.
+    Deactivate removes permissions but keeps user record.
+    Delete is only intended to be called after deactivate and removes the record.
+    Purge is calling deactivate+delete together.
 
     Arguments:
         user {dict} -- Account record of the user.
-        delete {bool} -- True if the user is to be deleted, false if they are only disabled.
+        method {str} -- Any of: "delete", "deactivate", "purge".
     """
-    if delete:
+    if method == "delete":
+        delete_user_account(user, call_deactivate_account.token["access_token"])
+    elif method == "deactivate":
+        deactivate_account(user, call_deactivate_account.token["access_token"])
+    elif method == "purge":
+        deactivate_account(user, call_deactivate_account.token["access_token"])
         delete_user_account(user, call_deactivate_account.token["access_token"])
     else:
-        deactivate_account(user, call_deactivate_account.token["access_token"])
+        log = "call_deactivate_account run with unrecognized method: %s" % method
+        logging.error({"message": log, "category": "ERROR-CELERY-DEACTIVATE"})
 
 
 @APP.task(base=AuthorizedTask)
@@ -243,7 +289,7 @@ def check_last_login() -> None:
     """
     # Get list of accounts and their last logins.
     user_results = EVE_FETCHER.get(
-        token=check_last_login.token["access_token"], endpoint="accounts"
+        token=check_last_login.token["access_token"], endpoint="last_access"
     ).json()["_items"]
 
     # Define relevant time periods and get current time.
@@ -401,7 +447,7 @@ def grant_trial_access(users: List[str], admin: str, trial: dict) -> None:
         user_obj = user_res["_items"][0]
         try:
             user_obj["permissions"].append(
-                {"assay": None, "trial": trial["_id"]["$oid"], "role": "trial_w"}
+                {"assay": None, "trial": trial["_id"]["$oid"], "role": "trial_r"}
             )
             EVE_FETCHER.patch(
                 endpoint="accounts",
