@@ -11,7 +11,6 @@ import subprocess
 from typing import List
 
 from cidc_utils.requests import SmartFetch
-from google.cloud import storage
 
 from framework.celery.celery import APP
 from framework.tasks.administrative_tasks import get_authorized_users, manage_bucket_acl
@@ -56,8 +55,6 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
     """
 
     staging_id = upload_record["_id"]["$oid"]
-    client = storage.Client()
-    upload_bucket = client.bucket(GOOGLE_UPLOAD_BUCKET)
 
     for record in upload_record["files"]:
         trial_id = record["trial"]["$oid"]
@@ -81,8 +78,6 @@ def move_files_from_staging(upload_record: dict, google_path: str) -> None:
         )
         run_subprocess_with_logs(gs_args, "Moving files: ")
         logging.info({"message": log, "category": "FAIR-CELERY-RECORD"})
-
-        upload_bucket.delete_blob(old_name)
         authorized_users = get_authorized_users(
             {"trial": record["trial"], "assay": record["assay"]},
             move_files_from_staging.token["access_token"],
