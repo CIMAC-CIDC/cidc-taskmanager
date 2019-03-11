@@ -20,9 +20,9 @@ from snakemake import snakemake
 from framework.celery.celery import APP
 from framework.tasks.administrative_tasks import get_authorized_users, manage_bucket_acl
 from framework.tasks.authorized_task import AuthorizedTask
-from framework.tasks.cromwell_tasks import run_subprocess_with_logs
+from framework.tasks.storage_tasks import run_subprocess_with_logs
 from framework.tasks.parallelize_tasks import execute_in_parallel
-from framework.tasks.variables import EVE_URL
+from framework.tasks.variables import EVE_URL, GOOGLE_BUCKET_NAME
 from framework.tasks.analysis_tasks import set_record_processed, check_processed
 
 EVE = SmartFetch(EVE_URL)
@@ -60,7 +60,11 @@ class SnakeJobSettings(NamedTuple):
 
 
 DEFAULT_SETTINGS = SnakeJobSettings(
-    6, 8000, "default", [KubeToleration("NoSchedule", "snakemake", "Equal", "issnake")], True
+    6,
+    8000,
+    "default",
+    [KubeToleration("NoSchedule", "snakemake", "Equal", "issnake")],
+    True,
 )
 
 
@@ -82,9 +86,9 @@ def check_for_runs(token: str) -> Tuple[List[dict], List[dict]]:
         assay_query_string = "assays?where=%s" % json.dumps(assay_query)
 
         # Contains a list of all the running assays and their inputs
-        assay_response = EVE.get(token=token, endpoint=assay_query_string, code=200).json()[
-            "_items"
-        ]
+        assay_response = EVE.get(
+            token=token, endpoint=assay_query_string, code=200
+        ).json()["_items"]
         sought_mappings = [
             item
             for sublist in [x["non_static_inputs"] for x in assay_response]
@@ -105,7 +109,11 @@ def check_for_runs(token: str) -> Tuple[List[dict], List[dict]]:
         }
         return record_response, assay_dict
     except RuntimeError as rte:
-        error_msg = "Failed to fetch record: %s" % str(rte)
+        try:
+            str(query_string)
+            error_msg = "Failed to fetch record from data collection: %s" % str(rte)
+        except NameError:
+            error_msg = "Failed to fetch record from assays collection: %s" % str(rte)
         logging.error({"message": error_msg, "category": "ERROR-CELERY-QUERY"})
         return None
 
@@ -152,15 +160,7 @@ def clone_snakemake(git_url: str, folder_name: str) -> str:
         str -- Snakefile path.
     """
     run_subprocess_with_logs(
-        [
-            "git",
-            "clone",
-            "--single-branch",
-            "--branch",
-            "jason",
-            git_url,
-            folder_name,
-        ],
+        ["git", "clone", "--single-branch", "--branch", "jason", git_url, folder_name],
         "cloning snakemake",
     )
     return folder_name + "/Snakefile"
@@ -197,9 +197,9 @@ def run_snakefile(
         kubernetes_tolerations=[
             tolerance._asdict() for tolerance in kube_settings.tolerations
         ],
-        default_remote_prefix="lloyd-test-pipeline",
+        default_remote_prefix=GOOGLE_BUCKET_NAME,
         default_remote_provider="GS",
-        use_singularity=kube_settings.singularity
+        use_singularity=kube_settings.singularity,
     )
 
 
@@ -231,7 +231,7 @@ def create_input_json(
     inputs["sample_files"] = {}
     for record in records:
         inputs["sample_files"][record["mapping"]] = record["gs_uri"].replace(
-            "gs://lloyd-test-pipeline/", ""
+            "gs://%s/" % (GOOGLE_BUCKET_NAME), ""
         )
         files_used.append(
             {
@@ -248,7 +248,7 @@ def create_input_json(
             "gsutil",
             "cp",
             run_id + "/" + location,
-            "gs://lloyd-test-pipeline/" + new_path,
+            "gs://%s/%s" % (GOOGLE_BUCKET_NAME, new_path),
         ]
         run_subprocess_with_logs(gsutil_args, "Uploading references")
         inputs["reference_files"][reference] = new_path
@@ -301,12 +301,12 @@ def upload_snakelogs(analysis_id: str) -> List[str]:
         "-m",
         "cp",
         "-I",
-        "gs://lloyd-test-pipeline/runs/%s/logs" % analysis_id,
+        "gs://%s/runs/%s/logs" % (GOOGLE_BUCKET_NAME, analysis_id),
     ]
     subprocess.check_output(gsutil_args, stdin=fileprint.stdout)
     fileprint.wait()
     return [
-        "gs://lloyd-test-pipeline/runs/%s/logs/%s" % (analysis_id, log)
+        "gs://%s/runs/%s/logs/%s" % (GOOGLE_BUCKET_NAME, analysis_id, log)
         for log in snakelogs
     ]
 
@@ -374,14 +374,11 @@ def upload_results(valid_run: dict, outputs: List[str], token: str) -> List[dict
         List[dict] -- List of inserted records.
     """
     payload = []
-    bucket = storage.Client().get_bucket("lloyd-test-pipeline")
+    bucket = storage.Client().get_bucket(GOOGLE_BUCKET_NAME)
     aggregation_res = valid_run[0]["_id"]
     for output in outputs:
-        prefix = output.replace("lloyd-test-pipeline/", "")
-        logging.info({
-            "message": prefix,
-            "category": "PREFIX-EBUG"
-        })
+        prefix = output.replace(GOOGLE_BUCKET_NAME + "/", "")
+        logging.info({"message": prefix, "category": "PREFIX-EBUG"})
         output_file = [item for item in bucket.list_blobs(prefix=prefix)][0]
         payload.append(
             {
@@ -390,13 +387,14 @@ def upload_results(valid_run: dict, outputs: List[str], token: str) -> List[dict
                     datetime.timezone.utc
                 ).isoformat(),
                 "file_name": output_file.name.split("/")[-1],
+                "uuid_alias": "unaliased",
                 "file_size": output_file.size,
                 "sample_ids": aggregation_res["sample_ids"],
                 "number_of_samples": len(aggregation_res["sample_ids"]),
                 "trial": aggregation_res["trial"],
                 "trial_name": aggregation_res["trial_name"],
                 "assay": aggregation_res["assay"],
-                "gs_uri": "gs://lloyd-test-pipeline/" + output_file.name,
+                "gs_uri": "gs://%s/%s" % (GOOGLE_BUCKET_NAME, output_file.name),
                 "mapping": "",
                 "experimental_strategy": aggregation_res["experimental_strategy"],
                 "processed": False,
@@ -409,12 +407,12 @@ def upload_results(valid_run: dict, outputs: List[str], token: str) -> List[dict
             token,
         )
         manage_bucket_acl(
-            "lloyd-test-pipeline", payload[-1]["gs_uri"], authorized_users
+            GOOGLE_BUCKET_NAME, payload[-1]["gs_uri"], authorized_users
         )
     try:
-        inserts = EVE.post(endpoint="data_edit", code=201, token=token, json=payload).json()[
-            "_items"
-        ]
+        inserts = EVE.post(
+            endpoint="data_edit", code=201, token=token, json=payload
+        ).json()["_items"]
         logging.info(
             {
                 "message": "Records created for run outputs",
@@ -479,7 +477,7 @@ def update_analysis(
             _etag=analysis["_etag"],
             item_id=analysis["_id"],
             json=payload,
-            code=200
+            code=200,
         )
     except RuntimeError as rte:
         str_error = "Analysis update failed: %s" % str(rte)
@@ -580,9 +578,4 @@ def manage_workflows():
             )
         except RuntimeError as rte:
             str_log = "Snakemake run failed: %s" % str(rte)
-            logging.info(
-                {
-                    "message": str_log,
-                    "category": "ERROR-CELERY-SNAKEMAKE",
-                }
-            )
+            logging.info({"message": str_log, "category": "ERROR-CELERY-SNAKEMAKE"})
