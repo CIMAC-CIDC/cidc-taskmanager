@@ -406,9 +406,7 @@ def upload_results(valid_run: dict, outputs: List[str], token: str) -> List[dict
             {"assay": aggregation_res["assay"], "trial": aggregation_res["trial"]},
             token,
         )
-        manage_bucket_acl(
-            GOOGLE_BUCKET_NAME, payload[-1]["gs_uri"], authorized_users
-        )
+        manage_bucket_acl(GOOGLE_BUCKET_NAME, payload[-1]["gs_uri"], authorized_users)
     try:
         inserts = EVE.post(
             endpoint="data_edit", code=201, token=token, json=payload
@@ -456,6 +454,12 @@ def update_analysis(
     # If job succeeds, upload files.
     if outputs and not problem:
         payload["files_generated"] = upload_results(valid_run, outputs, token)
+        if not payload["files_generated"]:
+            payload["status"] = "Failed"
+            payload[
+                "error_message"
+            ] = "The pipeline failed to upload the results to the database."
+            payload.__delitem__("files_generated")
 
     if problem:
         payload["status"] = "Failed"
