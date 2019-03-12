@@ -17,6 +17,7 @@ import requests
 from cidc_utils.requests import SmartFetch
 from dateutil.parser import parse
 from google.cloud import storage
+from google.api_core.exceptions import NotFound
 
 from framework.celery.celery import APP
 from framework.tasks.authorized_task import AuthorizedTask
@@ -490,10 +491,18 @@ def manage_bucket_acl(
         )
         return
 
-    bucket = storage.Client().bucket(bucket_name)
-    pathname = "gs://" + bucket_name
-    blob_name = gs_path.replace(pathname, "")[1:]
-    blob = bucket.blob(blob_name)
+    try:
+        bucket = storage.Client().bucket(bucket_name)
+        pathname = "gs://" + bucket_name
+        blob_name = gs_path.replace(pathname, "")[1:]
+        blob = bucket.blob(blob_name)
+    except NotFound as ntf:
+        log = "Error fetching bucket for ACL modifications: %s, Error: %s" % (
+            blob_name,
+            str(ntf),
+        )
+        logging.error({"message": log, "category": "ERROR-CELERY-PERMISSIONS"})
+        return
 
     # Filter out entries without identifiers
     identified = list(filter(lambda x: "identifier" in x, blob.acl))

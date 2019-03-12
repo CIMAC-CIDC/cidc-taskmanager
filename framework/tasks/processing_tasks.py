@@ -18,7 +18,6 @@ from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
 from framework.tasks.authorized_task import AuthorizedTask
-from framework.tasks.cromwell_tasks import run_subprocess_with_logs
 from framework.tasks.data_classes import RecordContext
 from framework.tasks.parallelize_tasks import execute_in_parallel
 from framework.tasks.process_npx import (
@@ -26,6 +25,7 @@ from framework.tasks.process_npx import (
     process_clinical_metadata,
     process_olink_npx,
 )
+from framework.tasks.storage_tasks import run_subprocess_with_logs
 from framework.tasks.variables import EVE_URL
 
 EVE_FETCHER = SmartFetch(EVE_URL)
@@ -136,6 +136,8 @@ def process_maf(path: str, context: RecordContext) -> bool:
         new_record["trial"] = context.trial
         new_record["assay"] = context.assay
         new_record["processed"] = True
+
+        # Generate new alias for combined maf.
         new_record["gs_uri"] = (
             new_record["gs_uri"].replace(new_record["file_name"], "") + "/combined.maf"
         )
@@ -143,6 +145,14 @@ def process_maf(path: str, context: RecordContext) -> bool:
             ["gsutil", "mv", path, new_record["gs_uri"]],
             message="creating new combined maf: %s" % new_record["gs_uri"],
         )
+
+        try:
+            remove(path)
+        except FileNotFoundError:
+            pass
+
+        log = "Creating new Combined.maf: %s" % new_record["gs_uri"]
+        logging.info({"message": log, "category": "FAIR-CELERY-NEWCOMBINEDMAF"})
         try:
             EVE_FETCHER.post(
                 endpoint="data_edit",
@@ -177,8 +187,12 @@ def process_maf(path: str, context: RecordContext) -> bool:
     # Get lines of file
     with open(combined_file_name, "a") as outfile, open(path, "r") as new_maf:
         # Trim off the version and headers
-        new_maf.readline()
         line = new_maf.readline()
+
+        # Iterate past the header information.
+        while line[0] == ">":
+            line = new_maf.readline()
+
         while line:
             outfile.write(new_maf.readline())
             line = new_maf.readline()
@@ -188,6 +202,8 @@ def process_maf(path: str, context: RecordContext) -> bool:
         ["gsutil", "mv", combined_file_name, maf_gs_uri],
         message="Overwriting old combined.maf: %s" % maf_gs_uri,
     )
+    log = "Overwriting old combined.maf: %s" % maf_gs_uri
+    logging.info({"message": log, "category": "FAIR-CELERY-COMBINEDMAF"})
     new_sample_ids = combined_maffile["sample_ids"] + new_record["sample_ids"]
 
     # Patch data to include new samples.
@@ -196,8 +212,11 @@ def process_maf(path: str, context: RecordContext) -> bool:
             endpoint="data_edit",
             item_id=combined_maffile["_id"],
             _etag=combined_maffile["_etag"],
-            json={"sample_ids": new_sample_ids, "number_of_samples": len(new_sample_ids)},
-            token=process_file.token["access_token"]
+            json={
+                "sample_ids": new_sample_ids,
+                "number_of_samples": len(new_sample_ids),
+            },
+            token=process_file.token["access_token"],
         )
         return True
     except RuntimeError as rte:

@@ -15,7 +15,7 @@ LOGGER.info({"message": "Testing logging", "category": "INFO-CELERY"})
 APP = Celery(
     "taskmanager",
     include=[
-        "framework.tasks.cromwell_tasks",
+        "framework.tasks.storage_tasks",
         "framework.tasks.analysis_tasks",
         "framework.tasks.processing_tasks",
         "framework.tasks.administrative_tasks",

@@ -1,6 +1,6 @@
 FROM gcr.io/cidc-dfci/celery-base:debian
 
-RUN apt-get install squashfs-tools -y
+RUN apt-get install squashfs-tools -y --no-install-recommends
 COPY ./requirements.txt ./
 RUN python3.6 -m pip install -r requirements.txt
 

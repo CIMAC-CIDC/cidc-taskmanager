@@ -24,6 +24,7 @@ kubernetes = "*"
 pygraphviz = "*"
 "flake8-mypy" = "*"
 snakemake = {git = "https://github.com/CIMAC-CIDC/cidc-snakemake.git", ref = "resources"}
+google-api-core = "*"
 
 [dev-packages]
 "pep8" = "*"
