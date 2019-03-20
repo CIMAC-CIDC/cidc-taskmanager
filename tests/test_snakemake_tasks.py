@@ -85,6 +85,7 @@ def test_create_input_json():
                     "mapping": "INPUT_1",
                     "gs_uri": "gs://lloyd-test-pipeline/foo",
                     "file_name": "foo.fa",
+                    "data_format": "MAF",
                     "_id": "1234"
                 }
             ]

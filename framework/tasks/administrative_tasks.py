@@ -15,6 +15,7 @@ from typing import List
 
 import requests
 from cidc_utils.requests import SmartFetch
+from cidc_utils.loghandler.stack_driver_handler import log_formatted
 from dateutil.parser import parse
 from google.cloud import storage
 from google.api_core.exceptions import NotFound
@@ -176,7 +177,8 @@ def deactivate_account(user: dict, token: str) -> None:
 
     # Get list of records person is likely to be authorized on.
     gs_uri_list = get_user_records(user["permissions"], token)
-    revoke_access(GOOGLE_BUCKET_NAME, gs_uri_list, [user["email"]])
+    if gs_uri_list:
+        revoke_access(GOOGLE_BUCKET_NAME, gs_uri_list, [user["email"]])
     clear_permissions(user["_id"]["$oid"], token)
     change_upload_permission(GOOGLE_UPLOAD_BUCKET, [user["email"]], False)
 
@@ -543,12 +545,15 @@ def change_upload_permission(
     """
     bucket = storage.Client().bucket(bucket_name)
     action = "granted" if grant_or_revoke else "revoked"
+
     for email in user_emails:
         if grant_or_revoke:
             bucket.acl.user(email).grant_write()
+            bucket.acl.save()
         else:
             bucket.acl.user(email).revoke_read()
             bucket.acl.user(email).revoke_write()
+            bucket.acl.save()
     log = "Access %s to bucket %s for users: %s" % (
         action,
         bucket_name,
@@ -573,12 +578,10 @@ def revoke_access(bucket_name: str, gs_paths: List[str], emails: List[str]) -> N
         pathname = "gs://" + bucket_name
         blob_name = path.replace(pathname, "")[1:]
         blob = bucket.blob(blob_name)
-
         blob.acl.reload()
         for person in emails:
             blob.acl.user(person).revoke_read()
             blob.acl.user(person).revoke_write()
-
         blob.acl.save()
 
     message = "Access to objects: %s. Revoked for users: %s" % (
@@ -586,3 +589,39 @@ def revoke_access(bucket_name: str, gs_paths: List[str], emails: List[str]) -> N
         ", ".join(emails),
     )
     logging.info({"message": message, "category": "FAIR-CELERY-PERMISSIONS"})
+
+
+@APP.task(base=AuthorizedTask)
+def lock_trial(trial_id: str, admin: str) -> bool:
+    """
+    Locks a trial and associated assets so they cannot be used.
+
+    Arguments:
+        trial_id {str} -- ID of the trial to be locked.
+        admin {str} -- Email of the admin requesting the lock.
+
+    Returns:
+        bool -- [description]
+    """
+    token = lock_trial.token["access_token"]
+    # Patch the trial to be locked.
+    try:
+        etag = EVE_FETCHER.get(endpoint="trials", item_id=trial_id, token=token)
+        EVE_FETCHER.patch(
+            endpoint="trials",
+            item_id=trial_id,
+            _etag=etag,
+            token=token,
+            json={"locked": True},
+        )
+        log_formatted(
+            logging.info,
+            "Administrator %s locked trial %s" % (admin, trial_id),
+            "INFO-CELERY-TRIALLOCK",
+        )
+    except RuntimeError as rte:
+        log_formatted(
+            logging.error,
+            "Failed to lock trial:  %s , Error: %s" % (trial_id, str(rte)),
+            "ERROR-CELERY-API",
+        )

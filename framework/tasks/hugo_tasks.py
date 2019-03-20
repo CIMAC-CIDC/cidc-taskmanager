@@ -107,17 +107,7 @@ def refresh_hugo_defs():
             for x in range(0, len(hugo_entries), 10000)
         ]
 
-        result = execute_in_parallel(tasks, 700, 10)
-
-        if not result:
-            logging.error(
-                {
-                    "message": "Some of the hugo chunked uploads failed.",
-                    "category": "ERROR-CELERY-HUGO",
-                }
-            )
-        else:
-            logging.info({"message": "Hugo gene symbols updated"})
+        execute_in_parallel(tasks)
     except RuntimeError as run:
         error = "Error adding hugo symbols to DB: %s" % str(run)
         logging.error({"message": error, "category": "ERROR-CELERY-HUGO"})

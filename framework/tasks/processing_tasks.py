@@ -15,6 +15,7 @@ from typing import List
 from uuid import uuid4
 
 from cidc_utils.requests import SmartFetch
+from cidc_utils.loghandler.stack_driver_handler import log_formatted
 
 from framework.celery.celery import APP
 from framework.tasks.authorized_task import AuthorizedTask
@@ -99,6 +100,55 @@ def process_table(path: str, context: RecordContext) -> List[dict]:
     return entries
 
 
+def reformat_maf(new_record: dict, context: RecordContext) -> dict:
+    """
+    Deletes some items to turn a MAF into a combined maf.
+
+    Arguments:
+        new_record {dict} -- Data record for MAF file.
+
+    Returns:
+        dict -- Reformatted MAF record.
+    """
+    # Rename and create a new data entry.
+    new_record["file_name"] = "combined.maf"
+    new_record.__delitem__("_id")
+    new_record.__delitem__("_etag")
+    new_record.__delitem__("_created")
+    new_record.__delitem__("_updated")
+    new_record.__delitem__("_links")
+    new_record.__delitem__("_status")
+    new_record["trial"] = context.trial
+    new_record["assay"] = context.assay
+    new_record["processed"] = True
+
+    # Generate new alias for combined maf.
+    new_record["gs_uri"] = (
+        new_record["gs_uri"].replace(new_record["file_name"], "") + "/combined.maf"
+    )
+    return new_record
+
+
+def combine_mafs(path: str, combined_file_name: str) -> None:
+    """
+    Takes an existing maf, then writes a second maf file to it.
+
+    Arguments:
+        path {str} -- Path to existing combined maf.
+        combined_file_name {str} -- Path to write out to.
+
+    Returns:
+        None -- [description]
+    """
+    with open(combined_file_name, "a") as outfile, open(path, "r") as new_maf:
+        line = new_maf.readline()
+        while line[0] == "#":
+            line = new_maf.readline()
+        while line:
+            outfile.write(new_maf.readline())
+            line = new_maf.readline()
+
+
 def process_maf(path: str, context: RecordContext) -> bool:
     """
     Processes a new maf file to update the combined maf.
@@ -110,8 +160,6 @@ def process_maf(path: str, context: RecordContext) -> bool:
     Returns:
         bool -- True if finished without error, else false.
     """
-
-    # Exit if it is a processed record.
     if context.full_record["file_name"] == "combined.maf":
         return True
 
@@ -126,16 +174,7 @@ def process_maf(path: str, context: RecordContext) -> bool:
     new_record = context.full_record
     if not extant_combined_maf:
         # Rename and create a new data entry.
-        new_record["file_name"] = "combined.maf"
-        new_record.__delitem__("_id")
-        new_record.__delitem__("_etag")
-        new_record.__delitem__("_created")
-        new_record.__delitem__("_updated")
-        new_record.__delitem__("_links")
-        new_record.__delitem__("_status")
-        new_record["trial"] = context.trial
-        new_record["assay"] = context.assay
-        new_record["processed"] = True
+        reformat_maf(new_record, context)
 
         # Generate new alias for combined maf.
         new_record["gs_uri"] = (
@@ -151,8 +190,12 @@ def process_maf(path: str, context: RecordContext) -> bool:
         except FileNotFoundError:
             pass
 
-        log = "Creating new Combined.maf: %s" % new_record["gs_uri"]
-        logging.info({"message": log, "category": "FAIR-CELERY-NEWCOMBINEDMAF"})
+        log_formatted(
+            logging.info,
+            "Creating new Combined.maf: %s" % new_record["gs_uri"],
+            "FAIR-CELERY-NEWCOMBINEDMAF",
+        )
+
         try:
             EVE_FETCHER.post(
                 endpoint="data_edit",
@@ -167,13 +210,16 @@ def process_maf(path: str, context: RecordContext) -> bool:
                     time.sleep(20)
                     process_maf(path, context)
                 except RuntimeError as rte2:
-                    error_str = "Failed to create new combined.maf: %s" % str(rte2)
+                    error_str = "Failed to update combined.maf: %s" % str(rte2)
                     logging.error(
                         {"message": error_str, "category": "ERROR-CELERY-POST"}
                     )
-                    return False
-            error_str = "Failed to create new combined.maf: %s" % str(rte)
-            logging.error({"message": error_str, "category": "ERROR-CELERY-POST"})
+            else:
+                log_formatted(
+                    logging.error,
+                    "Failed to create new combined.maf: %s" % str(rte),
+                    "ERROR-CELERY-POST",
+                )
             return False
 
     combined_maffile = extant_combined_maf[0]
@@ -181,29 +227,22 @@ def process_maf(path: str, context: RecordContext) -> bool:
     combined_file_name = str(uuid4())
     run_subprocess_with_logs(
         ["gsutil", "mv", maf_gs_uri, combined_file_name],
-        message="copying combined maf file %s" % maf_gs_uri,
+        message="Copying combined maf file %s" % maf_gs_uri,
     )
 
-    # Get lines of file
-    with open(combined_file_name, "a") as outfile, open(path, "r") as new_maf:
-        # Trim off the version and headers
-        line = new_maf.readline()
-
-        # Iterate past the header information.
-        while line[0] == ">":
-            line = new_maf.readline()
-
-        while line:
-            outfile.write(new_maf.readline())
-            line = new_maf.readline()
+    # Combine mafs.
+    combine_mafs(path, combined_file_name)
 
     # Overwrite old file.
     run_subprocess_with_logs(
         ["gsutil", "mv", combined_file_name, maf_gs_uri],
         message="Overwriting old combined.maf: %s" % maf_gs_uri,
     )
-    log = "Overwriting old combined.maf: %s" % maf_gs_uri
-    logging.info({"message": log, "category": "FAIR-CELERY-COMBINEDMAF"})
+    log_formatted(
+        logging.info,
+        "Overwriting old combined.maf: %s" % maf_gs_uri,
+        "FAIR-CELERY-COMBINEDMAF",
+    )
     new_sample_ids = combined_maffile["sample_ids"] + new_record["sample_ids"]
 
     # Patch data to include new samples.
@@ -225,11 +264,17 @@ def process_maf(path: str, context: RecordContext) -> bool:
                 time.sleep(20)
                 process_maf(path, context)
             except RuntimeError as rte2:
-                error_str = "Failed to edit combined.maf: %s" % str(rte2)
-                logging.error({"message": error_str, "category": "ERROR-CELERY-PATCH"})
+                log_formatted(
+                    logging.error,
+                    "Failed to edit combined.maf: %s" % str(rte2),
+                    "ERROR-CELERY-PATCH",
+                )
                 return False
-        error_str = "Failed to create new combined.maf: %s" % str(rte)
-        logging.error({"message": error_str, "category": "ERROR-CELERY-POST"})
+        log_formatted(
+            logging.error,
+            "Failed to create new combined.maf: %s" % str(rte),
+            "ERROR-CELERY-PATCH",
+        )
         return False
 
 
@@ -428,8 +473,11 @@ def process_file(rec: dict, pro: str) -> bool:
     except RuntimeError as rte:
         # Catch unexpected error codes.
         if "422" not in str(rte):
-            log = "Upload failed for reasons other than validation: %s" % str(rte)
-            logging.error({"message": log, "category": "ERROR-CELERY-UPLOAD"})
+            log_formatted(
+                logging.error,
+                "Upload failed for reasons other than validation: %s" % str(rte),
+                "ERROR-CELERY-UPLOAD",
+            )
             return False
 
         # Extract Cerberus errors from response.
@@ -487,12 +535,4 @@ def postprocessing(records: List[dict]) -> None:
                 # If a match is found, add to job queue
                 tasks.append(process_file.s(rec, pro))
 
-    result = execute_in_parallel(tasks, 700, 10)
-
-    if not result:
-        logging.error(
-            {
-                "message": "Error, some of the data post processing tasks failed",
-                "category": "ERROR-CELERY-PROCESSING",
-            }
-        )
+    execute_in_parallel(tasks)

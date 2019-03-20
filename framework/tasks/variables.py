@@ -27,6 +27,7 @@ EVE_URL = None
 LOGSTORE = env.get("LOGSTORE")
 MANAGEMENT_API = env.get("MANAGEMENT_API")
 RABBIT_MQ_URI = None
+SENDGRID_API_KEY = env.get("SENDGRID_API_KEY")
 
 if not env.get("IN_CLOUD"):
     EVE_URL = "http://localhost:5000"

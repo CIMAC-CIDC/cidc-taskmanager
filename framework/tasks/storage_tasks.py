@@ -42,6 +42,23 @@ def run_subprocess_with_logs(
 
 
 @APP.task(base=AuthorizedTask)
+def delete_from_bucket(gs_uri: str) -> None:
+    """
+    Deletes a google clouds torage object with the given path.
+
+    Arguments:
+        gs_uri {str} -- Path of file to be deleted.
+
+    Returns:
+        None -- [description]
+    """
+    gsutil_args = ["gsutil", "rm", gs_uri]
+    run_subprocess_with_logs(gsutil_args, message="Deleting Object: %s")
+    log = "Finished deleting object: %s" % gs_uri
+    logging.info({"message": log, "category": "FAIR-CELERY-DELETE"})
+
+
+@APP.task(base=AuthorizedTask)
 def move_files_from_staging(upload_record: dict, google_path: str) -> None:
     """
     Function that moves a file from staging to permanent storage
