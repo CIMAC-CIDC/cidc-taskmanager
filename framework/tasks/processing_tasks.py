@@ -227,7 +227,7 @@ def process_maf(path: str, context: RecordContext) -> bool:
     combined_file_name = str(uuid4())
     run_subprocess_with_logs(
         ["gsutil", "mv", maf_gs_uri, combined_file_name],
-        message="copying combined maf file %s" % maf_gs_uri,
+        message="Copying combined maf file %s" % maf_gs_uri,
     )
 
     # Combine mafs.
