@@ -491,7 +491,7 @@ def upload_results(valid_run: dict, outputs: List[str], token: str) -> List[dict
         return None
 
 
-def add_inputs(run_id: str, inputs: List[dict], token) -> None:
+def add_inputs(run_id: str, inputs: List[dict], token) -> str:
     """
     Updates the analysis record with the inputs.
 
@@ -501,18 +501,18 @@ def add_inputs(run_id: str, inputs: List[dict], token) -> None:
         token {str} -- JWT
 
     Returns:
-        None -- [description]
+        str -- Updated _etag.
     """
     try:
         results = EVE.get(endpoint="analysis", item_id=run_id, token=token).json()
         etag = results["_etag"]
-        EVE.patch(
+        return EVE.patch(
             endpoint="analysis",
             item_id=run_id,
             _etag=etag,
             token=token,
             json={"files_used": inputs},
-        )
+        ).json()["_etag"]
     except RuntimeError as rte:
         log_formatted(
             logging.error,
@@ -629,7 +629,9 @@ def execute_workflow(valid_run: Tuple[dict, dict]):
     analysis_response["files_used"] = create_input_json(
         valid_run[0]["records"], run_id, cimac_sample_id
     )
-    add_inputs(run_id, analysis_response["files_used"], token)
+    analysis_response["_etag"] = add_inputs(
+        run_id, analysis_response["files_used"], token
+    )
 
     # Run Snakefile.
     try:
@@ -695,7 +697,7 @@ def manage_workflows():
             {"message": "Snakemake tasks starting", "category": "INFO-CELERY-SNAKEMAKE"}
         )
         try:
-            execute_in_parallel(run_tasks, 1000, 10)
+            execute_in_parallel(run_tasks)
             logging.info(
                 {
                     "message": "Snakemake run successful",

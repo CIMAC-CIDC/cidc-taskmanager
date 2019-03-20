@@ -5,14 +5,11 @@ Utility method for executing sub-tasks.
 __author__ = "Lloyd McCarthy"
 __license__ = "MIT"
 
-import time
-import logging
 from typing import List
 from celery import group
-from framework.celery.celery import APP
 
 
-def execute_in_parallel(tasks: List[object], timeout: int, step: int) -> bool:
+def execute_in_parallel(tasks: List[object]) -> bool:
     """
     Takes a list of function signatures of tasks and executes them in parallel.
 
@@ -24,7 +21,5 @@ def execute_in_parallel(tasks: List[object], timeout: int, step: int) -> bool:
     Returns:
         bool -- True if all tasks return without error, else false.
     """
-    # Run jobs on workers.
     job = group(tasks) if len(tasks) == 1 else group(*tasks)
-    result = job.apply_async()
-    return True
+    job.apply_async()
