@@ -31,6 +31,24 @@ from framework.tasks.variables import EVE_URL
 EVE_FETCHER = SmartFetch(EVE_URL)
 
 
+@APP.task()
+def test_sub_task(x):
+    i = 0
+    while i < x:
+        time.sleep(1)
+        i += 1
+    return True
+
+@APP.task()
+def test_group_task():
+    tasks = [test_sub_task.s(i) for i in range(0, 10)]
+    result = execute_in_parallel(tasks, 500, 5)
+    if result:
+        logging.info({ "message": "Tasks complete, good", "category": "DEBUG-CELERY"})
+    else:
+        logging.info({ "message": "Tasks failed, bad", "category": "DEBUG-CELERY"})
+
+
 def add_record_context(records: List[dict], context: RecordContext) -> None:
     """
     Adds the trial, assay, and record ID to a processed record.
@@ -190,7 +208,7 @@ def process_maf(path: str, context: RecordContext) -> bool:
         line = new_maf.readline()
 
         # Iterate past the header information.
-        while line[0] == ">":
+        while line[0] == "#":
             line = new_maf.readline()
 
         while line:

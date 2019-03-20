@@ -6,8 +6,10 @@ __author__ = "Lloyd McCarthy"
 __license__ = "MIT"
 
 import time
+import logging
 from typing import List
 from celery import group
+from framework.celery.celery import APP
 
 
 def execute_in_parallel(tasks: List[object], timeout: int, step: int) -> bool:
@@ -25,13 +27,4 @@ def execute_in_parallel(tasks: List[object], timeout: int, step: int) -> bool:
     # Run jobs on workers.
     job = group(tasks) if len(tasks) == 1 else group(*tasks)
     result = job.apply_async()
-
-    # Wait for jobs to finish.
-    cycles = 0
-    while not result.ready() and cycles < (timeout / step):
-        time.sleep(step)
-        cycles += 1
-
-    if not result.successful():
-        return False
     return True

@@ -14,6 +14,7 @@ import subprocess
 from typing import List, NamedTuple, Tuple
 
 from cidc_utils.requests import SmartFetch
+from cidc_utils.loghandler.stack_driver_handler import send_mail, log_formatted
 from google.cloud import storage
 from snakemake import snakemake
 
@@ -22,7 +23,7 @@ from framework.tasks.administrative_tasks import get_authorized_users, manage_bu
 from framework.tasks.authorized_task import AuthorizedTask
 from framework.tasks.storage_tasks import run_subprocess_with_logs
 from framework.tasks.parallelize_tasks import execute_in_parallel
-from framework.tasks.variables import EVE_URL, GOOGLE_BUCKET_NAME
+from framework.tasks.variables import EVE_URL, GOOGLE_BUCKET_NAME, SENDGRID_API_KEY
 from framework.tasks.analysis_tasks import set_record_processed, check_processed
 
 EVE = SmartFetch(EVE_URL)
@@ -114,7 +115,7 @@ def check_for_runs(token: str) -> Tuple[List[dict], List[dict]]:
             error_msg = "Failed to fetch record from data collection: %s" % str(rte)
         except NameError:
             error_msg = "Failed to fetch record from assays collection: %s" % str(rte)
-        logging.error({"message": error_msg, "category": "ERROR-CELERY-QUERY"})
+        log_formatted(logging.error, error_msg, "ERROR-CELERY-QUERY")
         return None
 
 
@@ -138,11 +139,10 @@ def find_valid_runs(record_response: dict, assay_dict: dict) -> List[Tuple[dict,
                 # If mappings are 1:1, a run may start.
                 valid_runs.append((grouping, assay_dict[assay_id]))
         except KeyError:
-            logging.error(
-                {
-                    "message": "A data file with an invalid assay id was found",
-                    "category": "ERROR-CELERY-SNAKEMAKE",
-                }
+            log_formatted(
+                logging.error,
+                "A record with an invalid assay id was found",
+                "ERROR-CELERY-SNAKEMAKE",
             )
             return None
     return valid_runs
@@ -166,7 +166,6 @@ def clone_snakemake(git_url: str, folder_name: str) -> str:
     return folder_name + "/Snakefile"
 
 
-@APP.task
 def run_snakefile(
     snakefile_path: str = "./Snakefile",
     workdir: str = "./",
@@ -238,6 +237,7 @@ def create_input_json(
                 "file_name": record["file_name"],
                 "gs_uri": record["gs_uri"],
                 "data_id": record["_id"],
+                "data_format": record["data_format"],
             }
         )
 
@@ -280,7 +280,7 @@ def register_analysis(valid_run: Tuple[dict, dict], token: str) -> dict:
     return {"_id": results["_id"], "_etag": results["_etag"]}
 
 
-def upload_snakelogs(analysis_id: str) -> List[str]:
+def upload_snakelogs(analysis_id: str) -> dict:
     """
     Upload snakemake's logs to google bucket.
 
@@ -288,11 +288,14 @@ def upload_snakelogs(analysis_id: str) -> List[str]:
         analysis_id {str} -- Id of the analysis run.
 
     Returns:
-        List[str] -- List of gs uris for snakelogs.
+        dict -- List of gs uris for snakelogs, and a list of the last 50 lines.
     """
     snakelogs: List[str] = os.listdir("%s/.snakemake/log/" % analysis_id)
     snakelogs_fullpath = [
         "%s/.snakemake/log/%s" % (analysis_id, logname) for logname in snakelogs
+    ]
+    snakelog_tails: List[str] = [
+        str.join("", tail(log, lines=50)) for log in snakelogs_fullpath
     ]
     filenames = str.join("\n", snakelogs_fullpath)
     fileprint = subprocess.Popen(("printf", filenames), stdout=subprocess.PIPE)
@@ -305,10 +308,62 @@ def upload_snakelogs(analysis_id: str) -> List[str]:
     ]
     subprocess.check_output(gsutil_args, stdin=fileprint.stdout)
     fileprint.wait()
-    return [
-        "gs://%s/runs/%s/logs/%s" % (GOOGLE_BUCKET_NAME, analysis_id, log)
-        for log in snakelogs
-    ]
+    return {
+        "log_locations": [
+            "gs://%s/runs/%s/logs/%s" % (GOOGLE_BUCKET_NAME, analysis_id, log)
+            for log in snakelogs
+        ],
+        "log_tails": snakelog_tails,
+    }
+
+
+def tail(filename: str, lines: int = 20, _buffer=4098) -> List[str]:
+    """
+    Helper function to get the last N lines of a file. If the file is shorter than N,
+    will return all lines.
+
+    Arguments:
+        filename {str} -- Path to file to fetch.
+
+    Keyword Arguments:
+        lines {int} -- "N" for "fetch the last N lines" (default: {20})
+        _buffer {int} -- Buffer size, generally don't set this. (default: {4098})
+
+    Returns:
+        List[str] -- Last N lines of the file in string form.
+    """
+    lines_found: List[str] = []
+    block_counter = -1
+    with open(filename, "r") as f:
+        while len(lines_found) < lines:
+            try:
+                f.seek(block_counter * _buffer, os.SEEK_END)
+            except IOError:  # either file is too small, or too many lines requested
+                f.seek(0)
+                lines_found = f.readlines()
+                break
+            lines_found = f.readlines()
+            block_counter -= 1
+    return lines_found[-lines:]
+
+
+def tail_logs(logs: List[str]) -> List[str]:
+    """
+    Takes a list of log uris and returns their tails concat into one.
+
+    Arguments:
+        logs {List[str]} -- [description]
+    """
+    log_list: List[str] = []
+    for i, uri in enumerate(logs):
+        filename: str = "tmp%s" % str(i)
+        gsutil_args = ["gsutil", "cp", "gs://" + uri, filename]
+        run_subprocess_with_logs(gsutil_args, message="Copying logs for tailing")
+        last_lines = str.join("", tail(filename, lines=50))
+        os.remove(filename)
+        log_list.append(last_lines)
+
+    return log_list
 
 
 def analyze_jobs(dag) -> Tuple[List[dict], List[str]]:
@@ -330,6 +385,7 @@ def analyze_jobs(dag) -> Tuple[List[dict], List[str]]:
             "completed": bool(job in dag.finished_jobs),
             "inputs": [],
             "outputs": [],
+            "log_tails": tail_logs(job.log),
         }
         try:
             job_entry["inputs"] = job.input
@@ -418,13 +474,51 @@ def upload_results(valid_run: dict, outputs: List[str], token: str) -> List[dict
             }
         )
         return [
-            {"data_id": x["_id"], "gs_uri": y["gs_uri"], "file_name": y["file_name"]}
+            {
+                "data_id": x["_id"],
+                "gs_uri": y["gs_uri"],
+                "file_name": y["file_name"],
+                "data_format": y["data_format"],
+            }
             for x, y in zip(inserts, payload)
         ]
     except RuntimeError as rte:
-        message = "Upload of run outputs failed: %s" % str(rte)
-        logging.error({"message": message, "category": "ERROR-CELERY-UPLOAD"})
+        log_formatted(
+            logging.error,
+            "Upload of run outputs failed: %s" % str(rte),
+            "ERROR-CELERY-UPLOAD",
+        )
         return None
+
+
+def add_inputs(run_id: str, inputs: List[dict], token) -> None:
+    """
+    Updates the analysis record with the inputs.
+
+    Arguments:
+        run_id {str} -- Record ID of the run.
+        inputs {List[dict]} -- List of files used.
+        token {str} -- JWT
+
+    Returns:
+        None -- [description]
+    """
+    try:
+        results = EVE.get(endpoint="analysis", item_id=run_id, token=token).json()
+        etag = results["_etag"]
+        EVE.patch(
+            endpoint="analysis",
+            item_id=run_id,
+            _etag=etag,
+            token=token,
+            json={"files_used": inputs},
+        )
+    except RuntimeError as rte:
+        log_formatted(
+            logging.error,
+            "Failed to upate analysis with inputs: %s" % str(rte),
+            "ERROR-CELERY-SNAKEMAKE",
+        )
 
 
 def update_analysis(
@@ -445,9 +539,17 @@ def update_analysis(
     """
     payload = valid_run[0]["_id"]
     payload["workflow_location"] = valid_run[1]["workflow_location"]
-    jobs, outputs = analyze_jobs(dag)
-    payload["jobs"] = jobs
-    payload["snakemake_logs"] = upload_snakelogs(analysis["_id"])
+
+    # Handle the case of failure to generate a DAG
+    if dag:
+        jobs, outputs = analyze_jobs(dag)
+        payload["jobs"] = jobs
+    else:
+        payload["jobs"] = []
+
+    snake_log_info = upload_snakelogs(analysis["_id"])
+    payload["snakemake_logs"] = snake_log_info["log_locations"]
+    payload["snakemake_log_tails"] = snake_log_info["log_tails"]
     payload["files_used"] = analysis["files_used"]
     payload["end_date"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -484,8 +586,11 @@ def update_analysis(
             code=200,
         )
     except RuntimeError as rte:
-        str_error = "Analysis update failed: %s" % str(rte)
-        logging.error({"message": str_error, "category": "ERROR-CELERY-PATCH"})
+        log_formatted(
+            logging.error,
+            "Analysis update failed: %s.\nPayload:%s" % (str(rte), payload),
+            "ERROR-CELERY-PATCH",
+        )
         return False
     return True
 
@@ -524,27 +629,44 @@ def execute_workflow(valid_run: Tuple[dict, dict]):
     analysis_response["files_used"] = create_input_json(
         valid_run[0]["records"], run_id, cimac_sample_id
     )
+    add_inputs(run_id, analysis_response["files_used"], token)
 
     # Run Snakefile.
-    workflow_dag, problem = run_snakefile(snakemake_file, workdir=run_id)
-
-    # If run fails, log it, reset records, return False.
-    if problem:
-        logging.error(
-            {"message": "Snakemake run failed!", "category": "ERROR-CELERY-SNAKEMAKE"}
+    try:
+        workflow_dag, problem = run_snakefile(snakemake_file, workdir=run_id)
+        if problem:
+            logging.error(
+                {
+                    "message": "Snakemake run failed!",
+                    "category": "ERROR-CELERY-SNAKEMAKE",
+                }
+            )
+            records, all_free = check_processed(valid_run[0]["records"], token)
+            set_record_processed(records, False, token)
+            error_str = str(problem)
+            logging.error({"message": error_str, "category": "ERROR-CELERY-SNAKEMAKE"})
+            send_mail(
+                "Snakemake Pipeline Failed",
+                "The snakemake pipeline failed with message: %s" % error_str,
+                ["cidc@jimmy.harvard.edu"],
+                "no-reply@cimac-network.org",
+                SENDGRID_API_KEY,
+            )
+            return False
+        return True
+    except Exception as excp:
+        log_formatted(
+            logging.error,
+            "Uncaught Snakemake Exception: %s. Run has failed." % str(excp),
+            "ERROR-CELERY-SNAKEMAKE",
         )
-        records, all_free = check_processed(valid_run[0]["records"], token)
-        set_record_processed(records, False, token)
-        error_str = str(problem)
-        logging.error({"message": error_str, "category": "ERROR-CELERY-SNAKEMAKE"})
+        problem = str(excp)
+    finally:
         update_analysis(
             valid_run, token, analysis_response, workflow_dag, problem=problem
         )
-        return False
 
-    # Update analysis entry w/ success
-    update_analysis(valid_run, token, analysis_response, workflow_dag)
-    return True
+    return False
 
 
 @APP.task(base=AuthorizedTask)
