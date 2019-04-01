@@ -5,6 +5,7 @@ Module for tasks that do post-run processing of output files.
 __author__ = "Lloyd McCarthy"
 __license__ = "MIT"
 
+import datetime
 import json
 import logging
 import re
@@ -16,6 +17,7 @@ from uuid import uuid4
 
 from cidc_utils.requests import SmartFetch
 from cidc_utils.loghandler.stack_driver_handler import log_formatted
+from dateutil import parser
 
 from framework.celery.celery import APP
 from framework.tasks.authorized_task import AuthorizedTask
@@ -106,25 +108,27 @@ def reformat_maf(new_record: dict, context: RecordContext) -> dict:
 
     Arguments:
         new_record {dict} -- Data record for MAF file.
+        context {RecordContext} -- Object holding the fetched maf file.
 
     Returns:
         dict -- Reformatted MAF record.
     """
     # Rename and create a new data entry.
     new_record["file_name"] = "combined.maf"
-    new_record.__delitem__("_id")
-    new_record.__delitem__("_etag")
-    new_record.__delitem__("_created")
-    new_record.__delitem__("_updated")
-    new_record.__delitem__("_links")
-    new_record.__delitem__("_status")
+
+    # Depending on the circumstances of the call, these extra keys may or may not exist.
+    for key in {"_id", "_etag", "_created", "_updated", "_links", "_status"}:
+        try:
+            new_record.__delitem__(key)
+        except KeyError:
+            pass
     new_record["trial"] = context.trial
     new_record["assay"] = context.assay
     new_record["processed"] = True
 
     # Generate new alias for combined maf.
     new_record["gs_uri"] = (
-        new_record["gs_uri"].replace(new_record["file_name"], "") + "/combined.maf"
+        new_record["gs_uri"].replace(new_record["file_name"], "") + "combined.maf"
     )
     return new_record
 
@@ -149,6 +153,94 @@ def combine_mafs(path: str, combined_file_name: str) -> None:
             line = new_maf.readline()
 
 
+def create_new_maf(path: str, context: RecordContext, token: str) -> bool:
+    """
+    Create a new combined MAF.
+
+    Arguments:
+        path {str} -- path to file
+        context {RecordContext} -- Object holding the record.
+
+    Returns:
+        bool -- True if succeeds, else false.
+    """
+    new_record = context.full_record
+
+    # Check for other analyses that finished recently.
+    an_query = "analysis?where=%s" % json.dumps(
+        {"trial": context.trial, "assay": context.assay, "status": "Completed"}
+    )
+    analysis_runs = EVE_FETCHER.get(endpoint=an_query, token=token).json()["_items"]
+    isotime = datetime.datetime.now(datetime.timezone.utc)
+
+    my_end = 0
+    my_run_id = None
+    for run in analysis_runs:
+        for output in run["files_generated"]:
+            if output["file_name"] == new_record["file_name"]:
+                my_end = parser.parse(run["end_date"])
+                my_run_id = run["_id"]
+
+    # If the time is close enough that the trial might not have cleaned up yet,
+    # wait, then retry.
+    for run in analysis_runs:
+        end = parser.parse(run["end_date"])
+        delta = (isotime - end).total_seconds()
+        if run["_id"] != my_run_id and delta < 30:
+            log_formatted(
+                logging.info,
+                "Another run ended recently, running checks to avoid race condition.",
+                "INFO-CELERY-MAF",
+            )
+            if (
+                my_end > end
+                or my_end == end
+                and min(my_run_id, run["_id"]) == my_run_id
+            ):
+                log_formatted(
+                    logging.info,
+                    "Detecting an older finished run. Sleeping",
+                    "INFO-CELERY-SLEEP",
+                )
+                time.sleep(5)
+                process_maf(path, context)
+                return True
+
+    # Rename and create a new data entry.
+    reformat_maf(new_record, context)
+
+    # Generate new alias for combined maf.
+    new_record["gs_uri"] = (
+        new_record["gs_uri"].replace(new_record["file_name"], "") + "/combined.maf"
+    )
+    run_subprocess_with_logs(
+        ["gsutil", "mv", path, new_record["gs_uri"]],
+        message="Copying new combined.maf to google bucket: %s" % new_record["gs_uri"],
+    )
+
+    try:
+        remove(path)
+    except FileNotFoundError:
+        pass
+
+    log_formatted(
+        logging.info,
+        "Copying for new combined.maf: %s complete." % new_record["gs_uri"],
+        "FAIR-CELERY-NEWCOMBINEDMAF",
+    )
+
+    try:
+        EVE_FETCHER.post(endpoint="data_edit", token=token, json=new_record, code=201)
+        return True
+    except RuntimeError as rte:
+        log_formatted(
+            logging.error,
+            "Failed to create new combined.maf: %s" % str(rte),
+            "ERROR-CELERY-POST",
+        )
+        return False
+
+
 def process_maf(path: str, context: RecordContext) -> bool:
     """
     Processes a new maf file to update the combined maf.
@@ -163,64 +255,19 @@ def process_maf(path: str, context: RecordContext) -> bool:
     if context.full_record["file_name"] == "combined.maf":
         return True
 
+    token = process_file.token["access_token"]
     # Check if a combined maf already exists.
     query_string = "data?where=%s" % json.dumps(
         {"trial": context.trial, "assay": context.assay, "file_name": "combined.maf"}
     )
-    extant_combined_maf = EVE_FETCHER.get(
-        endpoint=query_string, token=process_file.token["access_token"]
-    ).json()["_items"]
 
-    new_record = context.full_record
+    extant_combined_maf = EVE_FETCHER.get(endpoint=query_string, token=token).json()[
+        "_items"
+    ]
+
     if not extant_combined_maf:
-        # Rename and create a new data entry.
-        reformat_maf(new_record, context)
-
-        # Generate new alias for combined maf.
-        new_record["gs_uri"] = (
-            new_record["gs_uri"].replace(new_record["file_name"], "") + "/combined.maf"
-        )
-        run_subprocess_with_logs(
-            ["gsutil", "mv", path, new_record["gs_uri"]],
-            message="creating new combined maf: %s" % new_record["gs_uri"],
-        )
-
-        try:
-            remove(path)
-        except FileNotFoundError:
-            pass
-
-        log_formatted(
-            logging.info,
-            "Creating new Combined.maf: %s" % new_record["gs_uri"],
-            "FAIR-CELERY-NEWCOMBINEDMAF",
-        )
-
-        try:
-            EVE_FETCHER.post(
-                endpoint="data_edit",
-                token=process_file.token["access_token"],
-                json=new_record,
-                code=201,
-            )
-            return True
-        except RuntimeError as rte:
-            if "412" in str(rte):
-                try:
-                    time.sleep(20)
-                    process_maf(path, context)
-                except RuntimeError as rte2:
-                    error_str = "Failed to update combined.maf: %s" % str(rte2)
-                    logging.error(
-                        {"message": error_str, "category": "ERROR-CELERY-POST"}
-                    )
-            else:
-                log_formatted(
-                    logging.error,
-                    "Failed to create new combined.maf: %s" % str(rte),
-                    "ERROR-CELERY-POST",
-                )
-            return False
+        create_new_maf(path, context, token)
+        return True
 
     combined_maffile = extant_combined_maf[0]
     maf_gs_uri = combined_maffile["gs_uri"]
@@ -243,7 +290,7 @@ def process_maf(path: str, context: RecordContext) -> bool:
         "Overwriting old combined.maf: %s" % maf_gs_uri,
         "FAIR-CELERY-COMBINEDMAF",
     )
-    new_sample_ids = combined_maffile["sample_ids"] + new_record["sample_ids"]
+    new_sample_ids = combined_maffile["sample_ids"] + context.full_record["sample_ids"]
 
     # Patch data to include new samples.
     try:
@@ -255,24 +302,18 @@ def process_maf(path: str, context: RecordContext) -> bool:
                 "sample_ids": new_sample_ids,
                 "number_of_samples": len(new_sample_ids),
             },
-            token=process_file.token["access_token"],
+            token=token,
         )
         return True
     except RuntimeError as rte:
         if "412" in str(rte):
-            try:
-                time.sleep(20)
-                process_maf(path, context)
-            except RuntimeError as rte2:
-                log_formatted(
-                    logging.error,
-                    "Failed to edit combined.maf: %s" % str(rte2),
-                    "ERROR-CELERY-PATCH",
-                )
-                return False
+            time.sleep(5)
+            process_maf(path, context)
+            return True
+
         log_formatted(
             logging.error,
-            "Failed to create new combined.maf: %s" % str(rte),
+            "Failed to edit combined.maf: %s" % str(rte),
             "ERROR-CELERY-PATCH",
         )
         return False
@@ -380,16 +421,17 @@ def update_child_list(record_response: dict, endpoint: str, parent_id: str) -> d
             token=process_file.token["access_token"],
         )
     except RuntimeError as code_error:
-        if "200" not in str(code_error):
-            logging.error(
-                {"message": "Error fetching parent", "category": "ERROR-CELERY-GET"}
+        if not parent:
+            log_formatted(
+                logging.error,
+                "Error fetching parent %s" % str(code_error),
+                "ERROR-CELERY-GET",
             )
-        if parent and "200" not in str(code_error):
-            logging.error(
-                {
-                    "message": "Error updating child list of parent",
-                    "category": "ERROR-CELERY-PATCH-FAIR",
-                }
+        else:
+            log_formatted(
+                logging.error,
+                "Error updating child list of parent: %s" % str(code_error),
+                "ERROR-CELERY-PATCH-FAIR",
             )
         return None
 
@@ -452,6 +494,9 @@ def process_file(rec: dict, pro: str) -> bool:
     if not PROC[pro]["mongo"]:
         return True
 
+    if not records:
+        return False
+
     try:
         # First try a normal upload
         response = EVE_FETCHER.post(
@@ -505,13 +550,12 @@ def process_file(rec: dict, pro: str) -> bool:
 
             # Still update parent to tie to error documents.
             update_child_list(errors.json(), pro, rec["_id"]["$oid"])
-
             log_record_upload(new_upload, pro)
         except RuntimeError as rte:
             # If that fails, something on my end is wrong.
             log = "Upload of validation errors failed. %s" % str(rte)
             logging.error({"message": log, "category": "ERROR-CELERY-UPLOAD"})
-            return False
+    return False
 
 
 @APP.task
@@ -530,8 +574,11 @@ def postprocessing(records: List[dict]) -> None:
         logging.info({"message": message, "category": "FAIR-CELERY-PROCESSING"})
         for pro in PROC:
             if re.search(PROC[pro]["re"], rec["file_name"], re.IGNORECASE):
-                log = "Match found for " + rec["file_name"]
-                logging.info({"message": log, "category": "DEBUG-CELERY-PROCESSING"})
+                log_formatted(
+                    logging.info,
+                    "Match found for " + rec["file_name"],
+                    "INFO-CELERY-PROCESSING",
+                )
                 # If a match is found, add to job queue
                 tasks.append(process_file.s(rec, pro))
 

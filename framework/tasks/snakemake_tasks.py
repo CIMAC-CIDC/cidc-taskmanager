@@ -160,7 +160,15 @@ def clone_snakemake(git_url: str, folder_name: str) -> str:
         str -- Snakefile path.
     """
     run_subprocess_with_logs(
-        ["git", "clone", "--single-branch", "--branch", "jason", git_url, folder_name],
+        [
+            "git",
+            "clone",
+            "--single-branch",
+            "--branch",
+            "jason",
+            git_url,
+            folder_name,
+        ],
         "cloning snakemake",
     )
     return folder_name + "/Snakefile"
@@ -356,13 +364,19 @@ def tail_logs(logs: List[str]) -> List[str]:
     """
     log_list: List[str] = []
     for i, uri in enumerate(logs):
-        filename: str = "tmp%s" % str(i)
-        gsutil_args = ["gsutil", "cp", "gs://" + uri, filename]
-        run_subprocess_with_logs(gsutil_args, message="Copying logs for tailing")
-        last_lines = str.join("", tail(filename, lines=50))
-        os.remove(filename)
-        log_list.append(last_lines)
-
+        try:
+            filename: str = "tmp%s" % str(i)
+            gsutil_args = ["gsutil", "cp", "gs://" + uri, filename]
+            run_subprocess_with_logs(gsutil_args, message="Copying logs for tailing")
+            last_lines = str.join("", tail(filename, lines=50))
+            os.remove(filename)
+            log_list.append(last_lines)
+        except FileNotFoundError:
+            log_formatted(
+                logging.warning,
+                "No log found for gs_uri: %s. This may be the result of a failed pipeline.",
+                "WARNING-CELERY-SNAKEMAKE",
+            )
     return log_list
 
 

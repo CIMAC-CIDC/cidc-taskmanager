@@ -47,7 +47,6 @@ spec:
         container('python') {
           checkout scm
           sh 'pip3 install -r requirements.txt'
-          sh 'pytest --html=celery_tests.html'
           sh 'pytest --cov-report xml:coverage.xml --cov ./'
           sh 'curl -s https://codecov.io/bash | bash -s - -t ${CODECOV_TOKEN}'
         }
@@ -88,41 +87,6 @@ spec:
           sh 'docker build -t celery-taskmanager . --no-cache'
           sh 'docker tag celery-taskmanager gcr.io/cidc-dfci/celery-taskmanager:staging'
           sh 'docker push gcr.io/cidc-dfci/celery-taskmanager:staging'
-        }
-      }
-    }
-    stage('Upload report (dev)') {
-      when {
-        not {
-          anyOf {
-            branch "master";
-            branch "staging"
-          }
-        }
-      }
-      steps {
-        container('gcloud') {
-          sh 'gsutil cp celery_tests.html gs://cidc-test-reports/celery/dev'
-        }
-      }
-    }
-    stage('Upload report (staging)') {
-      when {
-        branch 'staging'
-      }
-      steps {
-        container('gcloud') {
-          sh 'gsutil cp celery_tests.html gs://cidc-test-reports/celery/staging'
-        }
-      }
-    }
-    stage('Upload report (master)') {
-      when {
-        branch 'master'
-      }
-      steps {
-        container('gcloud') {
-          sh 'gsutil cp celery_tests.html gs://cidc-test-reports/celery/master'
         }
       }
     }
