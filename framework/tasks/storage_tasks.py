@@ -10,6 +10,7 @@ import logging
 import subprocess
 from typing import List
 
+from cidc_utils.loghandler.stack_driver_handler import log_formatted
 from cidc_utils.requests import SmartFetch
 
 from framework.celery.celery import APP
@@ -20,16 +21,13 @@ from framework.tasks.variables import EVE_URL, GOOGLE_BUCKET_NAME, GOOGLE_UPLOAD
 EVE_FETCHER = SmartFetch(EVE_URL)
 
 
-def run_subprocess_with_logs(
-    cl_args: List[str], message: str, encoding: str = "utf-8", cwd: str = "."
-) -> None:
+def run_subprocess_with_logs(cl_args: List[str], message: str, cwd: str = ".") -> None:
     """
     Runs a subprocess command and logs the output.
 
     Arguments:
         cl_args {List[str]} -- List of string inputs to the shell command.
         message {str} -- Message that will precede output in the log.
-        encoding {str} -- indicates the encoding of the shell command output.
         cwd {str} -- Current working directory.
     """
     try:
@@ -54,8 +52,9 @@ def delete_from_bucket(gs_uri: str) -> None:
     """
     gsutil_args = ["gsutil", "rm", gs_uri]
     run_subprocess_with_logs(gsutil_args, message="Deleting Object: %s")
-    log = "Finished deleting object: %s" % gs_uri
-    logging.info({"message": log, "category": "FAIR-CELERY-DELETE"})
+    log_formatted(
+        logging.info, "Finished deleting object: %s" % gs_uri, "FAIR-CELERY-DELETE"
+    )
 
 
 @APP.task(base=AuthorizedTask)
